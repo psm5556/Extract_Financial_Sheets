@@ -37,7 +37,7 @@ def get_extended_financials(ticker_symbol):
             if free_cf < 0:
                 runway = round(total_cash / abs(free_cf), 2)
             else:
-                runway = "Infinite (Profit)" # inf 대신 문자열 처리
+                runway = "inf" # inf 대신 문자열 처리
         else:
             runway = None
 
