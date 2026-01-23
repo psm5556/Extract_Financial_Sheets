@@ -1,17 +1,17 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import gspread
 from datetime import datetime
 import time
 
-# --- 함수 정의: 재무 지표 가져오기 ---
+# --- 재무 지표 가져오기 함수 (기존 로직 유지) ---
 def get_financial_ratios(ticker_symbol):
     try:
-        # yfinance는 대문자를 선호합니다
         ticker = yf.Ticker(ticker_symbol.upper().strip())
         info = ticker.info
-
-        # 데이터 추출 (값이 없으면 None 반환)
+        
+        # 데이터 추출 및 변환
         dte = info.get("debtToEquity")
         cr = info.get("currentRatio")
         roe = info.get("returnOnEquity")
@@ -22,83 +22,95 @@ def get_financial_ratios(ticker_symbol):
         pbr = info.get("priceToBook")
         bps = info.get("bookValue")
 
-        # 단위 변환 및 반올림
         cr = round(cr * 100, 2) if cr else None
         roe = round(roe * 100, 2) if roe else None
         
         def to_million(val):
             return round(val / 1_000_000, 2) if val else None
 
-        total_cash_m = to_million(total_cash)
-        free_cf_m = to_million(free_cf)
-        operating_cf_m = to_million(operating_cf)
-        net_income_m = to_million(net_income)
-        
-        pbr = round(pbr, 2) if pbr else None
-        bps = round(bps, 2) if bps else None
-
-        # Runway 계산
-        runway_years = None
-        if total_cash and free_cf:
-            if free_cf < 0:
-                runway_years = round(total_cash / abs(free_cf), 2)
-            else:
-                runway_years = float('inf')
-
-        return dte, cr, roe, runway_years, total_cash_m, free_cf_m, operating_cf_m, net_income_m, pbr, bps
-
-    except Exception as e:
-        st.error(f"⚠️ {ticker_symbol} 데이터 오류: {e}")
+        results = [
+            dte, cr, roe,
+            round(total_cash / abs(free_cf), 2) if total_cash and free_cf and free_cf < 0 else (float('inf') if free_cf and free_cf >= 0 else None),
+            to_million(total_cash), to_million(free_cf), to_million(operating_cf), to_million(net_income),
+            round(pbr, 2) if pbr else None, round(bps, 2) if bps else None
+        ]
+        return results
+    except Exception:
         return [None] * 10
 
-# --- Streamlit UI ---
-st.title("📈 주식 재무 지표 대시보드")
-st.markdown("CSV 파일을 업로드하면 Yahoo Finance에서 재무 지표를 가져옵니다.")
+# --- UI 구성 ---
+st.set_page_config(page_title="Stock Analyzer", layout="wide")
+st.title("🚀 주식 분석 자동화 도구")
 
-# 1. 파일 업로드
-uploaded_file = st.file_uploader("티커가 포함된 CSV 파일을 업로드하세요 (컬럼명: ticker)", type=["csv"])
+# --- 사이드바: 입력 방식 선택 ---
+st.sidebar.header("📥 티커 입력 설정")
+input_method = st.sidebar.radio(
+    "입력 방식을 선택하세요",
+    ("텍스트 붙여넣기", "구글 스프레드시트", "CSV 파일 업로드")
+)
 
-if uploaded_file:
-    input_df = pd.read_csv(uploaded_file)
+tickers = []
+
+if input_method == "텍스트 붙여넣기":
+    raw_input = st.sidebar.text_area("티커를 입력하세요 (한 줄에 하나씩)", height=200, placeholder="AAPL\nTSLA\nNVDA")
+    if raw_input:
+        tickers = [t.strip() for t in raw_input.split('\n') if t.strip()]
+
+elif input_method == "구글 스프레드시트":
+    try:
+        sheet_id = st.secrets["GOOGLE_SHEET_ID"]
+        sheet_name = st.secrets["GOOGLE_SHEET_NAME"]
+        
+        # Public 시트 읽기 방식 (가장 간단한 방식)
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+        gs_df = pd.read_csv(url)
+        
+        st.sidebar.success("✅ 시트 연결 성공")
+        ticker_col = st.sidebar.selectbox("티커가 포함된 열(Column) 선택", gs_df.columns)
+        tickers = gs_df[ticker_col].dropna().astype(str).tolist()
+    except Exception as e:
+        st.sidebar.error(f"구글 시트 로드 실패: {e}")
+
+elif input_method == "CSV 파일 업로드":
+    uploaded_file = st.sidebar.file_uploader("CSV 파일 업로드", type=["csv"])
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        ticker_col = st.sidebar.selectbox("티커 열 선택", df.columns)
+        tickers = df[ticker_col].dropna().astype(str).tolist()
+
+# --- 메인 실행 화면 ---
+if tickers:
+    st.write(f"🔍 분석 대상 티커 개수: **{len(tickers)}개**")
     
-    if 'ticker' not in input_df.columns:
-        st.error("CSV 파일에 'ticker' 컬럼이 없습니다.")
-    else:
-        tickers = input_df['ticker'].tolist()
-        results = []
+    if st.button("데이터 분석 시작"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results_list = []
 
-        if st.button("데이터 불러오기 시작"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for idx, symbol in enumerate(tickers):
-                status_text.text(f"처리 중: {symbol} ({idx+1}/{len(tickers)})")
-                
-                # 데이터 가져오기
-                data = get_financial_ratios(symbol)
-                results.append([symbol] + list(data) + [datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
-                
-                # 진행률 업데이트
-                progress_bar.progress((idx + 1) / len(tickers))
-                time.sleep(0.5) # API 과부하 방지
+        for idx, symbol in enumerate(tickers):
+            status_text.text(f"진행 중: {symbol} ({idx+1}/{len(tickers)})")
+            data = get_financial_ratios(symbol)
+            results_list.append([symbol] + data + [datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+            progress_bar.progress((idx + 1) / len(tickers))
+            time.sleep(0.4) # API 호출 제한 방지
 
-            # 결과 데이터프레임 생성
-            columns = [
-                'ticker', 'debtToEquity(%)', 'currentRatio(%)', 'ROE(%)', 
-                'Runway(Years)', 'TotalCash(M$)', 'FreeCashflow(M$)', 
-                'OperatingCashflow(M$)', 'NetIncome(M$)', 'PBR', 'BPS($)', 'lastUpdated'
-            ]
-            res_df = pd.DataFrame(results, columns=columns)
+        columns = [
+            'ticker', 'debtToEquity(%)', 'currentRatio(%)', 'ROE(%)', 
+            'Runway(Years)', 'TotalCash(M$)', 'FreeCashflow(M$)', 
+            'OperatingCashflow(M$)', 'NetIncome(M$)', 'PBR', 'BPS($)', 'lastUpdated'
+        ]
+        res_df = pd.DataFrame(results_list, columns=columns)
 
-            # 결과 출력
-            st.success("✅ 모든 데이터를 가져왔습니다!")
-            st.dataframe(res_df)
+        st.success("✅ 분석 완료!")
+        st.dataframe(res_df, use_container_width=True)
 
-            # 다운로드 버튼
-            csv = res_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="결과 CSV 다운로드",
-                data=csv,
-                file_name=f"financial_results_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime='text/csv',
-            )
+        # 결과 다운로드
+        csv = res_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="결과 CSV 다운로드",
+            data=csv,
+            file_name=f"stock_report_{datetime.now().strftime('%m%d_%H%M')}.csv",
+            mime='text/csv'
+        )
+else:
+    st.info("왼쪽 사이드바에서 티커 목록을 제공해 주세요.")
