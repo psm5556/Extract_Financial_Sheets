@@ -6,50 +6,49 @@ from datetime import datetime
 import time
 from urllib.parse import quote
 
-# --- [함수] 투자 등급 평가 로직 (Rule-based) ---
+# --- [함수] 투자 등급 평가 로직 (사용자 정의 로직 통합) ---
 def evaluate_investment(row):
     score = 0
     reasons = []
     
-    # 1. EPS 성장성 (최근 3년 추세: Y3 vs TTM)
-    # 데이터가 '-' 인 경우를 대비해 예외처리
     try:
-        eps_y3 = float(row.get('EPS_Y3', 0))
-        eps_ttm = float(row.get('EPS_TTM', 0))
-        if eps_ttm > eps_y3 and eps_y3 != 0:
+        # 1. EPS 성장성 (최근 3년 추세: Y3 대비 TTM)
+        eps_y3 = row.get('EPS_Y3')
+        eps_ttm = row.get('EPS_TTM')
+        
+        # 값이 숫자이고 유효한지 확인
+        if isinstance(eps_y3, (int, float)) and isinstance(eps_ttm, (int, float)):
+            if eps_ttm > eps_y3:
+                score += 30
+                reasons.append("✅ EPS 성장세 확인")
+        
+        # 2. 현금흐름 질 (CFQ)
+        cfq = row.get('CFQ_TTM')
+        if isinstance(cfq, (int, float)) and cfq >= 1.0:
             score += 30
-            reasons.append("✅ EPS 성장세")
-    except: pass
-    
-    # 2. 현금흐름 질 (CFQ)
-    try:
-        cfq = float(row.get('CFQ_TTM', 0))
-        if cfq >= 1.0:
-            score += 30
-            reasons.append("✅ 현금창출력(CFQ>1)")
-    except: pass
-    
-    # 3. 수익성 (ROE)
-    try:
-        roe = float(row.get('ROE(%)', 0))
-        if roe >= 15:
-            score += 20
-            reasons.append("✅ 고ROE(15%↑)")
-        elif roe < 0:
-            score -= 10
-            reasons.append("⚠️ 적자지속")
-    except: pass
+            reasons.append("✅ 현금 창출력 우수 (CFQ > 100%)")
+        
+        # 3. 수익성 (ROE)
+        roe = row.get('ROE(%)')
+        if isinstance(roe, (int, float)):
+            if roe >= 15:
+                score += 20
+                reasons.append("✅ 높은 자본 효율성 (ROE 15%↑)")
+            elif roe < 0:
+                score -= 10
+                reasons.append("⚠️ 자본 잠식 혹은 적자 지속")
 
-    # 4. 재무 건전성 (DTE)
-    try:
-        dte = float(row.get('DTE(%)', 1000))
-        if dte <= 100:
-            score += 20
-            reasons.append("✅ 재무안정")
-        elif dte > 200:
-            score -= 10
-            reasons.append("🚨 고부채")
-    except: pass
+        # 4. 재무 건전성 (DTE)
+        dte = row.get('DTE(%)')
+        if isinstance(dte, (int, float)):
+            if dte <= 100:
+                score += 20
+                reasons.append("✅ 재무 구조 매우 안정")
+            elif dte > 200:
+                score -= 10
+                reasons.append("🚨 고부채 리스크 (DTE 200%↑)")
+    except Exception:
+        pass
 
     # 등급 결정
     if score >= 90: grade = "S (강력 매수 후보)"
@@ -57,13 +56,14 @@ def evaluate_investment(row):
     elif score >= 50: grade = "B (보유 및 관망)"
     else: grade = "C (투자 유의/제외)"
     
-    return grade, ", ".join(reasons)
+    return grade, ", ".join(reasons) if reasons else "데이터 부족으로 평가 제한"
 
 # --- [함수] 재무 데이터 추출 로직 ---
 def get_extended_financials(ticker_symbol):
     try:
         symbol = ticker_symbol.upper().strip()
         ticker = yf.Ticker(symbol)
+        
         info = ticker.info
         fin = ticker.financials
         bs = ticker.balance_sheet
@@ -73,7 +73,7 @@ def get_extended_financials(ticker_symbol):
             try: return df.loc[label].iloc[idx]
             except: return None
 
-        # 기본 데이터 수집
+        # 1. TTM 기본 데이터 추출
         ttm_dte = info.get("debtToEquity")
         ttm_cr = (info.get("currentRatio") * 100) if info.get("currentRatio") else None
         ttm_opm = (info.get("operatingMargins") * 100) if info.get("operatingMargins") else None
@@ -85,7 +85,7 @@ def get_extended_financials(ticker_symbol):
         
         runway = round(total_cash / abs(ttm_fcf), 2) if total_cash and ttm_fcf and ttm_fcf < 0 else "Infinite"
 
-        # 시계열 데이터 수집 (Y4 ~ Y1)
+        # 2. 5개년 추이 수집 (Y4 -> TTM)
         metrics_order = ["DTE", "CR", "OPM", "ROE", "OCF", "EPS", "CFQ", "FCF"]
         history = {m: [None]*4 for m in metrics_order}
         num_years = min(len(fin.columns), 4) if not fin.empty else 0
@@ -109,22 +109,26 @@ def get_extended_financials(ticker_symbol):
 
         ttm_fcf_m = round(ttm_fcf/1_000_000, 2) if ttm_fcf else None
         fcf_series = history["FCF"] + [ttm_fcf_m]
-        stability = (sum(1 for v in fcf_series if v and v > 0) / 5) * 100 if any(v is not None for v in fcf_series) else 0
+        stability = (sum(1 for v in fcf_series if v is not None and v > 0) / 5) * 100 if any(v is not None for v in fcf_series) else 0
 
-        # 요약 결과 리턴
+        # 요약 결과 (13개 기본 지표)
         base_results = [
-            round(ttm_dte, 2) if ttm_dte else None,
-            round(ttm_cr, 2) if ttm_cr else None,
-            round(ttm_opm, 2) if ttm_opm else None,
-            round(ttm_roe, 2) if ttm_roe else None,
-            runway, round(total_cash/1_000_000, 2) if total_cash else None,
-            ttm_fcf_m, stability, round(ttm_ocf/1_000_000, 2) if ttm_ocf else None,
+            round(ttm_dte, 2) if ttm_dte is not None else None,
+            round(ttm_cr, 2) if ttm_cr is not None else None,
+            round(ttm_opm, 2) if ttm_opm is not None else None,
+            round(ttm_roe, 2) if ttm_roe is not None else None,
+            runway,
+            round(total_cash / 1_000_000, 2) if total_cash else None,
+            ttm_fcf_m,
+            stability,
+            round(ttm_ocf / 1_000_000, 2) if ttm_ocf else None,
             round(info.get("priceToBook"), 2) if info.get("priceToBook") else None,
             round(info.get("bookValue"), 2) if info.get("bookValue") else None,
             round(info.get("trailingPE"), 2) if info.get("trailingPE") else None,
             round(info.get("trailingEps"), 2) if info.get("trailingEps") else None
         ]
 
+        # TTM 맵 생성 (추이 데이터용)
         ttm_vals_map = {
             "DTE": base_results[0], "CR": base_results[1], "OPM": base_results[2], 
             "ROE": base_results[3], "OCF": base_results[8], "EPS": base_results[12],
@@ -137,47 +141,73 @@ def get_extended_financials(ticker_symbol):
             flattened_history.extend(history[key] + [ttm_vals_map.get(key)])
 
         return base_results + flattened_history
-    except:
+    except Exception:
         return [None] * (13 + 40)
 
-# --- [UI] ---
-st.set_page_config(page_title="Stock Master Eval", layout="wide")
-st.title("📊 재무 기반 투자 등급 자동 평가 시스템")
+# --- [UI] Streamlit 설정 ---
+st.set_page_config(page_title="Stock Grading System", layout="wide")
+st.title("📊 재무 시계열 분석 및 투자 등급 자동 평가")
 
-raw = st.sidebar.text_area("티커 입력")
-tickers = [t.strip().upper() for t in raw.split('\n') if t.strip()]
+st.sidebar.header("📥 분석 대상")
+method = st.sidebar.radio("입력 방식", ("텍스트", "구글 시트", "CSV 업로드"))
+tickers = []
 
-if tickers and st.sidebar.button("분석 시작"):
-    results = []
-    
-    # 1. 헤더 설정
-    base_cols = [
-        'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
-        'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
-        'PBR', 'BPS', 'PER', 'EPS', 'Updated'
-    ]
-    metrics = ["DTE", "CR", "OPM", "ROE", "OCF", "EPS", "CFQ", "FCF"]
-    history_cols = [f"{m}_{y}" for m in metrics for y in ["Y4", "Y3", "Y2", "Y1", "TTM"]]
-    final_cols = base_cols + history_cols
+if method == "텍스트":
+    raw = st.sidebar.text_area("티커 입력 (한 줄에 하나씩)")
+    if raw: tickers = [t.strip().upper() for t in raw.split('\n') if t.strip()]
+elif method == "구글 시트":
+    try:
+        sid, sname = st.secrets["GOOGLE_SHEET_ID"], st.secrets["GOOGLE_SHEET_NAME"]
+        url = f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet={quote(sname)}"
+        gs_df = pd.read_csv(url); t_col = st.sidebar.selectbox("티커 컬럼", gs_df.columns)
+        tickers = gs_df[t_col].dropna().astype(str).tolist()
+    except Exception as e: st.sidebar.error("시트 연결 확인 필요")
+elif method == "CSV 업로드":
+    up = st.sidebar.file_uploader("파일 선택", type=["csv"])
+    if up:
+        df = pd.read_csv(up); t_col = st.sidebar.selectbox("티커 컬럼", df.columns)
+        tickers = df[t_col].dropna().astype(str).tolist()
 
-    for t in tickers:
-        data = get_extended_financials(t)
-        row = [t] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
-        results.append(row)
-        time.sleep(0.5)
+if tickers:
+    if st.button("🚀 분석 실행 및 등급 평가"):
+        prog = st.progress(0); status = st.empty(); results = []
+        
+        # 헤더 정의
+        base_cols = [
+            'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
+            'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
+            'PBR', 'BPS', 'PER', 'EPS', 'Updated'
+        ]
+        metrics = ["DTE", "CR", "OPM", "ROE", "OCF", "EPS", "CFQ", "FCF"]
+        history_cols = [f"{m}_{y}" for m in metrics for y in ["Y4", "Y3", "Y2", "Y1", "TTM"]]
+        final_cols = base_cols + history_cols
 
-    res_df = pd.DataFrame(results, columns=final_cols)
+        for idx, symbol in enumerate(tickers):
+            status.info(f"분석 중: {symbol} ({idx+1}/{len(tickers)})")
+            data = get_extended_financials(symbol)
+            row = [symbol] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
+            results.append(row)
+            prog.progress((idx+1)/len(tickers))
+            time.sleep(0.3)
 
-    # 2. 투자 등급 평가 칼럼 추가 (작성해주신 로직 적용)
-    eval_list = []
-    for _, row in res_df.iterrows():
-        grade, reason = evaluate_investment(row)
-        eval_list.append({'최종 등급': grade, '평가 근거': reason})
-    
-    eval_df = pd.DataFrame(eval_list)
-    # 데이터프레임 맨 앞에 티커와 평가 결과 배치
-    display_df = pd.concat([res_df[['ticker']], eval_df, res_df.drop(columns=['ticker'])], axis=1).fillna("-")
+        res_df = pd.DataFrame(results, columns=final_cols)
 
-    # 3. 결과 출력
-    st.subheader("🎯 종목별 종합 투자 평가")
-    st.dataframe(display_df, use_container_width=True)
+        # 투자 등급 평가 적용
+        eval_data = []
+        for _, row in res_df.iterrows():
+            grade, reason = evaluate_investment(row)
+            eval_data.append({"최종 등급": grade, "핵심 평가": reason})
+        
+        eval_df = pd.DataFrame(eval_data)
+        
+        # 티커 옆에 등급 배치하여 최종 결과 구성
+        final_display_df = pd.concat([
+            res_df[['ticker']], 
+            eval_df, 
+            res_df.drop(columns=['ticker'])
+        ], axis=1).fillna("-")
+
+        status.success("✅ 전수 분석 및 등급 평가 완료!")
+        st.subheader("🎯 종목별 종합 투자 평가")
+        st.dataframe(final_display_df, use_container_width=True)
+        st.download_button("📥 결과 CSV 다운로드", final_display_df.to_csv(index=False).encode('utf-8'), "stock_grading_report.csv")
