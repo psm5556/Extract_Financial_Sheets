@@ -1,167 +1,104 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import time
-from pathlib import Path
 
-
+# --- 함수 정의: 재무 지표 가져오기 ---
 def get_financial_ratios(ticker_symbol):
-    """
-    Yahoo Finance 제공 지표(D/E, Current Ratio, ROE) + freeCashflow 기반 Runway 계산
-    + OperatingCashflow, NetIncome, PBR, BPS 추가
-    Runway(Years) = totalCash / abs(freeCashflow)
-    totalCash, freeCashflow, operatingCashflow, netIncome은 M달러(Million USD) 단위로 변환
-    """
     try:
-        ticker = yf.Ticker(ticker_symbol)
+        # yfinance는 대문자를 선호합니다
+        ticker = yf.Ticker(ticker_symbol.upper().strip())
         info = ticker.info
 
-        # ✅ Yahoo 제공 기본 지표
-        dte = info.get("debtToEquity")           # %
-        cr = info.get("currentRatio")            # 배수 (1.25 → 125%)
-        roe = info.get("returnOnEquity")         # 비율 (0.15 → 15%)
+        # 데이터 추출 (값이 없으면 None 반환)
+        dte = info.get("debtToEquity")
+        cr = info.get("currentRatio")
+        roe = info.get("returnOnEquity")
+        total_cash = info.get("totalCash")
+        free_cf = info.get("freeCashflow")
+        operating_cf = info.get("operatingCashflow")
+        net_income = info.get("netIncomeToCommon")
+        pbr = info.get("priceToBook")
+        bps = info.get("bookValue")
 
-        # ✅ Runway 계산용 항목
-        total_cash = info.get("totalCash")             # USD
-        free_cf = info.get("freeCashflow")             # USD (연간)
-        operating_cf = info.get("operatingCashflow")   # USD (연간)
-        net_income = info.get("netIncomeToCommon")     # USD (연간)
+        # 단위 변환 및 반올림
+        cr = round(cr * 100, 2) if cr else None
+        roe = round(roe * 100, 2) if roe else None
+        
+        def to_million(val):
+            return round(val / 1_000_000, 2) if val else None
 
-        # ✅ PBR, BPS 항목
-        pbr = info.get("priceToBook")                  # 배수
-        bps = info.get("bookValue")                    # USD per share
+        total_cash_m = to_million(total_cash)
+        free_cf_m = to_million(free_cf)
+        operating_cf_m = to_million(operating_cf)
+        net_income_m = to_million(net_income)
+        
+        pbr = round(pbr, 2) if pbr else None
+        bps = round(bps, 2) if bps else None
 
-        # 🔹 단위 변환
-        if cr is not None:
-            cr = round(cr * 100, 2)
-        if roe is not None:
-            roe = round(roe * 100, 2)
-
-        total_cash_m = None
-        free_cf_m = None
-        operating_cf_m = None
-        net_income_m = None
-        if total_cash is not None:
-            total_cash_m = round(total_cash / 1_000_000, 2)  # M달러로 변환
-        if free_cf is not None:
-            free_cf_m = round(free_cf / 1_000_000, 2)        # M달러로 변환
-        if operating_cf is not None:
-            operating_cf_m = round(operating_cf / 1_000_000, 2)  # M달러로 변환
-        if net_income is not None:
-            net_income_m = round(net_income / 1_000_000, 2)  # M달러로 변환
-
-        # 🔹 PBR, BPS 반올림
-        if pbr is not None:
-            pbr = round(pbr, 2)
-        if bps is not None:
-            bps = round(bps, 2)
-
-        # 🔹 Runway 계산 (연 단위)
+        # Runway 계산
         runway_years = None
         if total_cash and free_cf:
             if free_cf < 0:
                 runway_years = round(total_cash / abs(free_cf), 2)
-            elif free_cf >= 0:
-                runway_years = float('inf')  # 흑자 기업은 Runway 무제한
+            else:
+                runway_years = float('inf')
 
         return dte, cr, roe, runway_years, total_cash_m, free_cf_m, operating_cf_m, net_income_m, pbr, bps
 
     except Exception as e:
-        print(f"⚠️ Error fetching info for {ticker_symbol}: {e}")
-        return None, None, None, None, None, None, None, None, None, None
+        st.error(f"⚠️ {ticker_symbol} 데이터 오류: {e}")
+        return [None] * 10
 
+# --- Streamlit UI ---
+st.title("📈 주식 재무 지표 대시보드")
+st.markdown("CSV 파일을 업로드하면 Yahoo Finance에서 재무 지표를 가져옵니다.")
 
-def fetch_financial_data(input_file, output_file=None, ticker_column='ticker'):
-    """CSV에서 티커를 읽고 Yahoo Finance 제공 지표 + Runway 계산 후 저장 (M달러 단위 포함, OperatingCashflow, NetIncome 추가)"""
-    print(f"📂 Reading input file: {input_file}")
-    try:
-        df = pd.read_csv(input_file)
-    except Exception as e:
-        print(f"❌ Error reading file: {e}")
-        return
+# 1. 파일 업로드
+uploaded_file = st.file_uploader("티커가 포함된 CSV 파일을 업로드하세요 (컬럼명: ticker)", type=["csv"])
 
-    if ticker_column not in df.columns:
-        print(f"❌ Column '{ticker_column}' not found. Available: {df.columns.tolist()}")
-        return
+if uploaded_file:
+    input_df = pd.read_csv(uploaded_file)
+    
+    if 'ticker' not in input_df.columns:
+        st.error("CSV 파일에 'ticker' 컬럼이 없습니다.")
+    else:
+        tickers = input_df['ticker'].tolist()
+        results = []
 
-    # ✅ 결과파일명 자동 설정
-    if output_file is None:
-        path = Path(input_file)
-        output_file = path.parent / f"{path.stem}_result.csv"
+        if st.button("데이터 불러오기 시작"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for idx, symbol in enumerate(tickers):
+                status_text.text(f"처리 중: {symbol} ({idx+1}/{len(tickers)})")
+                
+                # 데이터 가져오기
+                data = get_financial_ratios(symbol)
+                results.append([symbol] + list(data) + [datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+                
+                # 진행률 업데이트
+                progress_bar.progress((idx + 1) / len(tickers))
+                time.sleep(0.5) # API 과부하 방지
 
-    # ✅ 결과 컬럼 초기화 (FreeCashflow 다음에 OperatingCashflow, NetIncome, PBR, BPS 추가)
-    df['debtToEquity(%)'] = None
-    df['currentRatio(%)'] = None
-    df['ROE(%)'] = None
-    df['Runway(Years)'] = None
-    df['TotalCash(M$)'] = None
-    df['FreeCashflow(M$)'] = None
-    df['OperatingCashflow(M$)'] = None
-    df['NetIncome(M$)'] = None
-    df['PBR'] = None
-    df['BPS($)'] = None
-    df['lastUpdated'] = None
+            # 결과 데이터프레임 생성
+            columns = [
+                'ticker', 'debtToEquity(%)', 'currentRatio(%)', 'ROE(%)', 
+                'Runway(Years)', 'TotalCash(M$)', 'FreeCashflow(M$)', 
+                'OperatingCashflow(M$)', 'NetIncome(M$)', 'PBR', 'BPS($)', 'lastUpdated'
+            ]
+            res_df = pd.DataFrame(results, columns=columns)
 
-    print(f"💾 Output file: {output_file}")
-    print(f"📊 Found {len(df)} tickers")
-    print("-" * 60)
+            # 결과 출력
+            st.success("✅ 모든 데이터를 가져왔습니다!")
+            st.dataframe(res_df)
 
-    success = 0
-
-    for idx, row in df.iterrows():
-        ticker_symbol = str(row[ticker_column]).strip()
-        if not ticker_symbol or ticker_symbol.lower() == 'nan':
-            continue
-
-        print(f"[{idx + 1}/{len(df)}] {ticker_symbol} ...")
-
-        dte, cr, roe, runway, total_cash, free_cf, operating_cf, net_income, pbr, bps = get_financial_ratios(ticker_symbol)
-
-        df.at[idx, 'debtToEquity(%)'] = dte
-        df.at[idx, 'currentRatio(%)'] = cr
-        df.at[idx, 'ROE(%)'] = roe
-        df.at[idx, 'Runway(Years)'] = runway
-        df.at[idx, 'TotalCash(M$)'] = total_cash
-        df.at[idx, 'FreeCashflow(M$)'] = free_cf
-        df.at[idx, 'OperatingCashflow(M$)'] = operating_cf
-        df.at[idx, 'NetIncome(M$)'] = net_income
-        df.at[idx, 'PBR'] = pbr
-        df.at[idx, 'BPS($)'] = bps
-        df.at[idx, 'lastUpdated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        success += 1
-        if (idx + 1) % 10 == 0:
-            df.to_csv(output_file, index=False)
-            print(f"💾 Progress saved ({idx + 1}/{len(df)})")
-
-        time.sleep(0.5)  # 과도한 요청 방지
-
-    # ✅ 컬럼 순서 재정렬 (FreeCashflow 다음에 OperatingCashflow, NetIncome, PBR, BPS)
-    column_order = [
-        ticker_column,
-        'debtToEquity(%)',
-        'currentRatio(%)',
-        'ROE(%)',
-        'Runway(Years)',
-        'TotalCash(M$)',
-        'FreeCashflow(M$)',
-        'OperatingCashflow(M$)',
-        'NetIncome(M$)',
-        'PBR',
-        'BPS($)',
-        'lastUpdated'
-    ]
-    df = df[column_order]
-
-    # ✅ 최종 저장
-    df.to_csv(output_file, index=False)
-    print("-" * 60)
-    print(f"✅ Complete! Results saved to {output_file}")
-    print(f"✅ Successful: {success}/{len(df)} tickers")
-
-    print("\n=== Sample Results ===")
-    print(df.head(10))
-
-
-if __name__ == "__main__":
-    fetch_financial_data("tickers.csv")
+            # 다운로드 버튼
+            csv = res_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="결과 CSV 다운로드",
+                data=csv,
+                file_name=f"financial_results_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime='text/csv',
+            )
