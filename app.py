@@ -61,13 +61,19 @@ elif input_method == "구글 스프레드시트":
         sheet_id = st.secrets["GOOGLE_SHEET_ID"]
         sheet_name = st.secrets["GOOGLE_SHEET_NAME"]
         
-        # Public 시트 읽기 방식 (가장 간단한 방식)
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+        # 1. 시트 이름에 한글이 있을 경우를 대비해 URL 인코딩 처리
+        encoded_sheet_name = quote(sheet_name)
+        
+        # 2. 구글 시트 CSV 내보내기 URL 구성
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={encoded_sheet_name}"
+        
+        # 3. 데이터 읽기
         gs_df = pd.read_csv(url)
         
-        st.sidebar.success("✅ 시트 연결 성공")
+        st.sidebar.success(f"✅ 시트 연결 성공: {sheet_name}")
         ticker_col = st.sidebar.selectbox("티커가 포함된 열(Column) 선택", gs_df.columns)
         tickers = gs_df[ticker_col].dropna().astype(str).tolist()
+        
     except Exception as e:
         st.sidebar.error(f"구글 시트 로드 실패: {e}")
 
