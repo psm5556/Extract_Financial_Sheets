@@ -1,5 +1,3 @@
-yfinance
+streamlit
+yfinance>=0.2.40
 pandas
-datetime
-time
-pathlib
