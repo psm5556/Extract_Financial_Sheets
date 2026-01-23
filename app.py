@@ -31,7 +31,7 @@ def get_extended_financials(ticker_symbol):
         ttm_net_inc = info.get("netIncomeToCommon")
         total_cash = info.get("totalCash")
         
-        # Runway 계산 및 inf 처리
+        # Runway 계산
         if total_cash and ttm_fcf:
             runway = round(total_cash / abs(ttm_fcf), 2) if ttm_fcf < 0 else "Infinite (Profit)"
         else:
@@ -65,26 +65,27 @@ def get_extended_financials(ticker_symbol):
         plus_count = sum(1 for v in fcf_series if v is not None and v > 0)
         stability = (plus_count / 5) * 100 if any(v is not None for v in fcf_series) else None
 
-        # 3. 요약 섹션(base_results) 데이터 구성 (Total Cash 복구)
+        # 3. 요약 섹션(base_results) 데이터 구성 (BPS 복구)
         base_results = [
             round(ttm_dte, 2) if ttm_dte is not None else None,
             round(ttm_cr, 2) if ttm_cr is not None else None,
             round(ttm_opm, 2) if ttm_opm is not None else None,
             round(ttm_roe, 2) if ttm_roe is not None else None,
             runway,
-            round(total_cash / 1_000_000, 2) if total_cash else None, # Total Cash 복구(M$)
+            round(total_cash / 1_000_000, 2) if total_cash else None,
             ttm_fcf_m,
             stability,
             round(ttm_ocf / 1_000_000, 2) if ttm_ocf else None,
             round(info.get("priceToBook"), 2) if info.get("priceToBook") else None,
+            round(info.get("bookValue"), 2) if info.get("bookValue") else None, # BPS 복구
             round(info.get("trailingPE"), 2) if info.get("trailingPE") else None,
             round(info.get("trailingEps"), 2) if info.get("trailingEps") else None
         ]
 
-        # 4. 시계열 추이 데이터 매핑 (인덱스 주의)
+        # 4. 시계열 추이 데이터 매핑 (인덱스: BPS 추가로 하나씩 더 밀림)
         ttm_vals_map = {
             "DTE": base_results[0], "CR": base_results[1], "OPM": base_results[2], 
-            "ROE": base_results[3], "OCF": base_results[8], "EPS": base_results[11],
+            "ROE": base_results[3], "OCF": base_results[8], "EPS": base_results[12],
             "CFQ": round(ttm_ocf/ttm_net_inc, 2) if ttm_ocf and ttm_net_inc and ttm_net_inc != 0 else None,
             "FCF": ttm_fcf_m
         }
@@ -96,11 +97,11 @@ def get_extended_financials(ticker_symbol):
 
         return base_results + flattened_history
     except Exception:
-        return [None] * (12 + 40)
+        return [None] * (13 + 40)
 
 # --- [UI] Streamlit 설정 ---
 st.set_page_config(page_title="Stock Master Analyzer", layout="wide")
-st.title("📈 주식 재무 시계열 분석 마스터 (Y4 → TTM)")
+st.title("📊 주식 재무 시계열 분석 마스터 (Y4 → TTM)")
 
 # --- [사이드바] ---
 st.sidebar.header("📥 데이터 소스")
@@ -128,11 +129,11 @@ if tickers:
     if st.button("🚀 전수 분석 시작"):
         prog = st.progress(0); status = st.empty(); results = []
         
-        # 헤더 정의 (Total Cash 복구)
+        # 헤더 정의 (BPS 포함 13개)
         base_cols = [
             'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
             'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
-            'PBR', 'PER', 'EPS', 'Updated'
+            'PBR', 'BPS', 'PER', 'EPS', 'Updated'
         ]
         
         metrics = ["DTE", "CR", "OPM", "ROE", "OCF", "EPS", "CFQ", "FCF"]
@@ -143,8 +144,8 @@ if tickers:
             status.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})")
             data = get_extended_financials(symbol)
             
-            # row: [ticker] + [기본12개] + [시간] + [추이40개]
-            row = [symbol] + data[:12] + [datetime.now().strftime('%H:%M:%S')] + data[12:]
+            # row: [ticker] + [기본13개] + [시간] + [추이40개]
+            row = [symbol] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
             results.append(row)
             prog.progress((idx+1)/total); time.sleep(0.5)
 
