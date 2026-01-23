@@ -1,4 +1,5 @@
 streamlit
-yfinance>=0.2.40
+yfinance
 pandas
-gspread
+numpy
+google-generativeai
