@@ -12,6 +12,7 @@ def get_extended_financials(ticker_symbol):
         symbol = ticker_symbol.upper().strip()
         ticker = yf.Ticker(symbol)
         
+        # 데이터 로드
         info = ticker.info
         fin = ticker.financials
         bs = ticker.balance_sheet
@@ -21,7 +22,7 @@ def get_extended_financials(ticker_symbol):
             try: return df.loc[label].iloc[idx]
             except: return None
 
-        # 1. TTM (최근 12개월) 기본 데이터
+        # 1. TTM (최근 12개월) 기본 데이터 추출
         ttm_dte = info.get("debtToEquity")
         ttm_cr = (info.get("currentRatio") * 100) if info.get("currentRatio") else None
         ttm_opm = (info.get("operatingMargins") * 100) if info.get("operatingMargins") else None
@@ -30,56 +31,61 @@ def get_extended_financials(ticker_symbol):
         ttm_fcf = info.get("freeCashflow")
         ttm_net_inc = info.get("netIncomeToCommon")
         
-        # Runway 계산
+        # Runway 계산 및 inf 처리
         total_cash = info.get("totalCash")
         if total_cash and ttm_fcf:
             runway = round(total_cash / abs(ttm_fcf), 2) if ttm_fcf < 0 else "Infinite (Profit)"
         else:
             runway = None
 
-        # 2. 항목별 추이 데이터 수집 (Y4 -> TTM)
+        # 2. 항목별 추이 데이터 수집 (Y4 -> Y3 -> Y2 -> Y1)
+        # 5개 시점(Y4~TTM) 관리를 위해 4개 슬롯 미리 생성
         metrics_order = ["DTE", "CR", "OPM", "ROE", "OCF", "EPS", "CFQ", "FCF"]
         history = {m: [None]*4 for m in metrics_order}
         num_years = min(len(fin.columns), 4) if not fin.empty else 0
 
         for i in range(num_years):
-            idx = 3 - i 
+            idx = 3 - i # Y4(0), Y3(1), Y2(2), Y1(3) 순서로 배치
+            
+            # 원천 데이터 추출
             net_inc = get_val(fin, 'Net Income', i)
+            equity = get_val(bs, 'Total Equity Gross Minority Interest', i)
             ocf_val = get_val(cf, 'Operating Cash Flow', i)
             cap_ex = get_val(cf, 'Capital Expenditure', i)
             fcf_val = (ocf_val + cap_ex) if ocf_val is not None and cap_ex is not None else None
             
-            history["DTE"][idx] = round((get_val(bs, 'Total Liabilities Net Minority Interest', i)/get_val(bs, 'Total Equity Gross Minority Interest', i)*100), 2) if get_val(bs, 'Total Liabilities Net Minority Interest', i) and get_val(bs, 'Total Equity Gross Minority Interest', i) else None
+            # 지표 계산 및 저장
+            history["DTE"][idx] = round((get_val(bs, 'Total Liabilities Net Minority Interest', i)/equity*100), 2) if get_val(bs, 'Total Liabilities Net Minority Interest', i) and equity else None
             history["CR"][idx] = round((get_val(bs, 'Current Assets', i)/get_val(bs, 'Current Liabilities', i)*100), 2) if get_val(bs, 'Current Assets', i) and get_val(bs, 'Current Liabilities', i) else None
             history["OPM"][idx] = round((get_val(fin, 'Operating Income', i)/get_val(fin, 'Total Revenue', i)*100), 2) if get_val(fin, 'Operating Income', i) and get_val(fin, 'Total Revenue', i) else None
-            history["ROE"][idx] = round((net_inc/get_val(bs, 'Total Equity Gross Minority Interest', i)*100), 2) if net_inc and get_val(bs, 'Total Equity Gross Minority Interest', i) else None
+            history["ROE"][idx] = round((net_inc/equity*100), 2) if net_inc and equity else None
             history["OCF"][idx] = round(ocf_val/1_000_000, 2) if ocf_val else None
             history["EPS"][idx] = round(get_val(fin, 'Basic EPS', i), 2) if get_val(fin, 'Basic EPS', i) else None
             history["CFQ"][idx] = round(ocf_val/net_inc, 2) if ocf_val and net_inc and net_inc != 0 else None
             history["FCF"][idx] = round(fcf_val/1_000_000, 2) if fcf_val else None
 
-        # TTM 값 확정 (Stability 계산을 위해 시계열 합침)
+        # TTM 값 확정 및 Stability 계산
         ttm_fcf_m = round(ttm_fcf/1_000_000, 2) if ttm_fcf else None
         fcf_series = history["FCF"] + [ttm_fcf_m]
         plus_count = sum(1 for v in fcf_series if v is not None and v > 0)
         stability = (plus_count / 5) * 100 if any(v is not None for v in fcf_series) else None
 
-        # [수정된 base_results] FCF와 Stability를 OCF 앞으로 배치
+        # 3. 요약 섹션(base_results) 데이터 구성 (중복 포함)
         base_results = [
             round(ttm_dte, 2) if ttm_dte is not None else None,
             round(ttm_cr, 2) if ttm_cr is not None else None,
             round(ttm_opm, 2) if ttm_opm is not None else None,
             round(ttm_roe, 2) if ttm_roe is not None else None,
             runway,
-            ttm_fcf_m,   # FCF 추가 (OCF 전)
-            stability,   # Stability 추가
+            ttm_fcf_m,   # OCF 앞에 FCF 배치
+            stability,   # FCF_Stability 배치
             round(ttm_ocf / 1_000_000, 2) if ttm_ocf else None,
             round(info.get("priceToBook"), 2) if info.get("priceToBook") else None,
             round(info.get("trailingPE"), 2) if info.get("trailingPE") else None,
             round(info.get("trailingEps"), 2) if info.get("trailingEps") else None
         ]
 
-        # 시계열 추이 데이터 평탄화
+        # 4. 시계열 추이 데이터 평탄화 (Y4 -> TTM)
         flattened_history = []
         ttm_vals_map = {
             "DTE": base_results[0], "CR": base_results[1], "OPM": base_results[2], 
@@ -92,26 +98,48 @@ def get_extended_financials(ticker_symbol):
             combined = history[key] + [ttm_vals_map[key]]
             flattened_history.extend(combined)
 
-        # 리턴: [기본11개] + [추이40개]
         return base_results + flattened_history
     except Exception:
         return [None] * (11 + 40)
 
 # --- [UI] Streamlit 설정 ---
 st.set_page_config(page_title="Stock Master Analyzer", layout="wide")
-st.title("📊 재무 핵심 요약 및 5개년 추이 분석")
+st.title("📈 주식 재무 시계열 분석 마스터 (Y4 → TTM)")
 
-# (사이드바 입력 로직 생략 - 이전과 동일)
-# ... [이전 답변의 사이드바 코드와 동일하게 유지] ...
+# --- [사이드바] 입력 설정 ---
+st.sidebar.header("📥 데이터 소스")
+method = st.sidebar.radio("입력 방식 선택", ("텍스트 붙여넣기", "구글 스프레드시트", "CSV 파일 업로드"))
+
+tickers = []
+if method == "텍스트 붙여넣기":
+    raw = st.sidebar.text_area("티커 입력 (한 줄에 하나씩)", placeholder="AAPL\nMSFT\nTSLA")
+    if raw: tickers = [t.strip().upper() for t in raw.split('\n') if t.strip()]
+elif method == "구글 스프레드시트":
+    try:
+        sid, sname = st.secrets["GOOGLE_SHEET_ID"], st.secrets["GOOGLE_SHEET_NAME"]
+        url = f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet={quote(sname)}"
+        gs_df = pd.read_csv(url)
+        t_col = st.sidebar.selectbox("티커 컬럼 선택", gs_df.columns)
+        tickers = gs_df[t_col].dropna().astype(str).tolist()
+    except Exception as e: st.sidebar.error(f"❌ 시트 연결 실패: {e}")
+elif method == "CSV 파일 업로드":
+    up = st.sidebar.file_uploader("CSV 파일 업로드", type=["csv"])
+    if up:
+        df = pd.read_csv(up)
+        t_col = st.sidebar.selectbox("티커 컬럼 선택", df.columns)
+        tickers = df[t_col].dropna().astype(str).tolist()
 
 # --- [메인] 분석 실행 ---
 if tickers:
     total = len(tickers)
-    if st.button("🚀 분석 시작"):
-        prog = st.progress(0); status = st.empty(); results = []
+    st.write(f"📝 분석 대상: **{total}개 종목**")
+    
+    if st.button("🚀 전수 분석 시작"):
+        progress_bar = st.progress(0)
+        status_text = st.empty() # 한 줄 업데이트용 공간
+        results = []
         
-        # 1. 헤더 구성
-        # base_cols: OCF 앞에 FCF와 Stability 배치
+        # 칼럼 헤더 정의
         base_cols = [
             'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
             'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 'PBR', 'PER', 'EPS', 'Updated'
@@ -122,15 +150,30 @@ if tickers:
         final_cols = base_cols + history_cols
 
         for idx, symbol in enumerate(tickers):
-            status.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1}/{total})")
-            data = get_extended_financials(symbol)
+            # 한 줄 업데이트
+            status_text.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})")
             
-            # row: [ticker] + [기본11개] + [시간] + [추이40개]
+            data = get_extended_financials(symbol)
+            # row 구성: [symbol] + [기본11개] + [시간] + [추이40개]
             row = [symbol] + data[:11] + [datetime.now().strftime('%H:%M:%S')] + data[11:]
             results.append(row)
-            prog.progress((idx+1)/total); time.sleep(0.5)
+            
+            progress_bar.progress((idx + 1) / total)
+            time.sleep(0.5)
 
-        status.success(f"✅ 분석 완료!")
+        status_text.success(f"✅ 총 {total}개 종목 분석이 완료되었습니다!")
+        
+        # 결과 출력 및 결측치 처리
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
         st.dataframe(res_df, use_container_width=True)
-        st.download_button("📥 결과 다운로드", res_df.to_csv(index=False).encode('utf-8'), "financial_full_report.csv", "text/csv")
+        
+        # CSV 다운로드 버튼
+        csv_data = res_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 분석 결과 CSV 다운로드",
+            data=csv_data,
+            file_name=f"financial_analysis_{datetime.now().strftime('%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
+else:
+    st.info("👈 왼쪽 사이드바에서 분석할 티커를 입력해주세요.")
