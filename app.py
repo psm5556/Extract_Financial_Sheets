@@ -4,6 +4,7 @@ import pandas as pd
 import gspread
 from datetime import datetime
 import time
+from urllib.parse import quote
 
 # --- 재무 지표 가져오기 함수 (기존 로직 유지) ---
 def get_financial_ratios(ticker_symbol):
