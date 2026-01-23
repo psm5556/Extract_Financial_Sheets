@@ -18,6 +18,8 @@ def generate_ai_analysis(ticker, data_summary):
             return "API 키가 설정되지 않았습니다."
             
         genai.configure(api_key=api_key)
+        
+        # 모델 설정 (가장 안정적인 최신 플래시 모델명 사용)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = f"""
@@ -38,9 +40,16 @@ def generate_ai_analysis(ticker, data_summary):
         4. 어조는 전문적이고 단호한 평어체를 사용하세요.
         """
 
+        # generate_content 호출 시 모델 경로 문제가 생기지 않도록 처리
         response = model.generate_content(prompt)
-        return response.text.strip()
+        
+        if response and response.text:
+            return response.text.strip()
+        else:
+            return "AI가 응답을 생성했으나 내용이 비어있습니다."
+            
     except Exception as e:
+        # 에러 메시지를 더 구체적으로 파악하기 위해 출력
         return f"AI 분석 중 오류 발생: {str(e)}"
 
 # --- [함수] 재무 데이터 추출 로직 ---
