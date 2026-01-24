@@ -1,5 +1,10 @@
-streamlit
-yfinance
-pandas
-numpy
-google-generativeai>=0.8.3
+# 기본 패키지
+streamlit==1.32.0
+yfinance==0.2.37
+pandas==2.2.0
+numpy==1.26.4
+
+# LLM 제공자 (하나 이상 선택)
+google-generativeai==0.4.0  # Google Gemini (무료, 추천)
+groq==0.11.0                # Groq (무료, 빠름)
+anthropic==0.39.0           # Claude (유료, 고품질)
