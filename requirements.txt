@@ -1,8 +1,8 @@
 # 기본 패키지
-streamlit==1.32.0
-yfinance==0.2.37
-pandas==2.2.0
-numpy==1.26.4
+streamlit
+yfinance
+pandas
+numpy
 
 # LLM 제공자 (하나 이상 선택)
 google-generativeai==0.4.0  # Google Gemini (무료, 추천)
