@@ -120,22 +120,32 @@ def analyze_with_ai(ticker, financial_data, llm_provider):
             "EPS": financial_data[12]
         }
         
-        prompt = f"""You are a financial analyst. Analyze this stock and provide:
-1. Grade: A/B/C/D/F
-2. Brief reason in Korean (max 50 words)
+        prompt = f"""You are a professional financial analyst. Analyze {ticker} stock and provide investment grade and detailed Korean explanation.
 
-Financial Data for {ticker}:
+Financial Data:
 {json.dumps(metrics, indent=2)}
 
-Evaluation Criteria:
-- A: Excellent (ROE>15%, PER<20, Stable FCF, Low debt)
-- B: Good (Most metrics positive)
-- C: Average (Mixed results)
-- D: Below average (Multiple weaknesses)
-- F: Poor (Critical issues)
+CRITICAL INSTRUCTIONS:
+1. Grade: Assign A/B/C/D/F based on overall financial health
+2. Reason: Write in KOREAN, minimum 40 words, maximum 80 words
+3. Reason MUST be complete sentences, NOT abbreviations or bullet points
+4. Focus on 2-3 most important insights
+5. Return ONLY valid JSON format
 
-Return ONLY this JSON format:
-{{"grade": "A", "reason": "Korean explanation here"}}"""
+Grading Criteria:
+- A (Excellent): ROE>20%, Strong FCF, PER<25, Low debt, Stable growth
+- B (Good): ROE 15-20%, Positive FCF, PER<30, Moderate debt
+- C (Average): ROE 10-15%, Mixed cash flow, PER<40, Average metrics
+- D (Below Average): ROE<10% or Negative FCF or High debt
+- F (Poor): Multiple critical weaknesses, high risk
+
+Example GOOD Response:
+{{"grade": "A", "reason": "자기자본이익률이 32%로 매우 우수하며, 잉여현금흐름이 안정적으로 양수를 유지하고 있습니다. PER 28배는 다소 높지만 성장성을 고려하면 적정 수준이며, 부채비율 150%는 업계 평균 수준입니다."}}
+
+Example BAD Response (DO NOT DO THIS):
+{{"grade": "A", "reason": "ROE, FCF, PER"}}  ← TOO SHORT, ABBREVIATIONS ONLY
+
+Now analyze {ticker}. Return ONLY JSON:"""
         
         # === GEMINI ===
         if llm_provider == "gemini":
@@ -146,13 +156,13 @@ Return ONLY this JSON format:
                 import google.generativeai as genai
                 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
                 
-                # 여러 모델 시도 (2025년 1월 기준 작동하는 모델)
+                # 2025년 1월 최신 Gemini 모델 (사용자 제공 정보 기반)
                 models_to_try = [
-                    'gemini-1.5-flash',  # 가장 안정적
-                    'gemini-1.5-pro',
-                    'gemini-pro',
-                    'models/gemini-1.5-flash',  # 전체 경로 시도
-                    'models/gemini-pro'
+                    'gemini-2.5-flash',      # 최신 안정 버전
+                    'gemini-3-flash',        # 최신 플래그십
+                    'gemini-2.5-flash-lite', # 경량 버전
+                    'gemini-1.5-flash',      # 레거시 안정 버전
+                    'gemini-1.5-pro'         # 레거시 프로 버전
                 ]
                 
                 last_error = None
@@ -164,10 +174,29 @@ Return ONLY this JSON format:
                         
                         # JSON 파싱
                         text = text.replace("```json", "").replace("```", "").strip()
-                        result = json.loads(text)
                         
-                        grade = result.get("grade", "C")
-                        reason = result.get("reason", "분석 완료")
+                        # JSON 추출 (다양한 형식 처리)
+                        if "{" in text and "}" in text:
+                            start = text.find("{")
+                            end = text.rfind("}") + 1
+                            json_text = text[start:end]
+                            result = json.loads(json_text)
+                        else:
+                            result = json.loads(text)
+                        
+                        grade = result.get("grade", "C").upper()
+                        reason = result.get("reason", "")
+                        
+                        # 품질 검증 (너무 짧거나 약어만 있는 응답 거부)
+                        if len(reason) < 20:
+                            continue  # 다음 모델 시도
+                        if reason.count(",") > 5 and len(reason.split()) < 10:
+                            continue  # 약어만 나열한 것으로 판단
+                        
+                        # 등급 유효성 검증
+                        if grade not in ['A', 'B', 'C', 'D', 'F']:
+                            grade = 'C'
+                        
                         return grade, reason
                         
                     except Exception as e:
@@ -199,16 +228,37 @@ Return ONLY this JSON format:
                         }
                     ],
                     model="llama-3.3-70b-versatile",
-                    temperature=0.5,
-                    max_tokens=500,
+                    temperature=0.7,  # 창의성 증가
+                    max_tokens=1000,  # 토큰 증가
                 )
                 
                 text = chat_completion.choices[0].message.content.strip()
-                text = text.replace("```json", "").replace("```", "").strip()
-                result = json.loads(text)
                 
-                grade = result.get("grade", "C")
-                reason = result.get("reason", "분석 완료")
+                # JSON 파싱
+                text = text.replace("```json", "").replace("```", "").strip()
+                
+                # JSON 추출
+                if "{" in text and "}" in text:
+                    start = text.find("{")
+                    end = text.rfind("}") + 1
+                    json_text = text[start:end]
+                    result = json.loads(json_text)
+                else:
+                    result = json.loads(text)
+                
+                grade = result.get("grade", "C").upper()
+                reason = result.get("reason", "")
+                
+                # 품질 검증
+                if len(reason) < 20:
+                    return "C", "AI 응답이 너무 짧습니다. 재시도 필요"
+                if reason.count(",") > 5 and len(reason.split()) < 10:
+                    return "C", "약어만 나열되었습니다. 더 상세한 분석이 필요합니다"
+                
+                # 등급 유효성 검증
+                if grade not in ['A', 'B', 'C', 'D', 'F']:
+                    grade = 'C'
+                
                 return grade, reason
                 
             except ImportError:
@@ -227,18 +277,40 @@ Return ONLY this JSON format:
                 
                 message = client.messages.create(
                     model="claude-sonnet-4-20250514",
-                    max_tokens=500,
+                    max_tokens=1000,
+                    temperature=0.7,
                     messages=[
                         {"role": "user", "content": prompt}
                     ]
                 )
                 
                 text = message.content[0].text.strip()
-                text = text.replace("```json", "").replace("```", "").strip()
-                result = json.loads(text)
                 
-                grade = result.get("grade", "C")
-                reason = result.get("reason", "분석 완료")
+                # JSON 파싱
+                text = text.replace("```json", "").replace("```", "").strip()
+                
+                # JSON 추출
+                if "{" in text and "}" in text:
+                    start = text.find("{")
+                    end = text.rfind("}") + 1
+                    json_text = text[start:end]
+                    result = json.loads(json_text)
+                else:
+                    result = json.loads(text)
+                
+                grade = result.get("grade", "C").upper()
+                reason = result.get("reason", "")
+                
+                # 품질 검증
+                if len(reason) < 20:
+                    return "C", "AI 응답이 너무 짧습니다"
+                if reason.count(",") > 5 and len(reason.split()) < 10:
+                    return "C", "약어만 나열되었습니다"
+                
+                # 등급 유효성 검증
+                if grade not in ['A', 'B', 'C', 'D', 'F']:
+                    grade = 'C'
+                
                 return grade, reason
                 
             except ImportError:
