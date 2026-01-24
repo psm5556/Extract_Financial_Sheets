@@ -100,75 +100,157 @@ def get_extended_financials(ticker_symbol):
     except Exception:
         return [None] * (13 + 40)
 
-# --- [함수] AI 투자 등급 분석 (새로 추가) ---
+# --- [함수] AI 투자 등급 분석 (완전 구현) ---
 def analyze_with_ai(ticker, financial_data, llm_provider):
     """AI를 사용한 투자 등급 분석"""
     try:
-        # Streamlit Secrets에서 API 키 가져오기
-        if llm_provider == "gemini":
-            if "GEMINI_API_KEY" not in st.secrets:
-                return "-", "API 키 미설정"
-            
-            import google.generativeai as genai
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            
-            # 재무 데이터 구성
-            metrics = {
-                "Ticker": ticker,
-                "DTE(%)": financial_data[0],
-                "CR(%)": financial_data[1],
-                "OPM(%)": financial_data[2],
-                "ROE(%)": financial_data[3],
-                "Runway": financial_data[4],
-                "Cash(M$)": financial_data[5],
-                "FCF(M$)": financial_data[6],
-                "Stability(%)": financial_data[7],
-                "PBR": financial_data[9],
-                "PER": financial_data[11],
-                "EPS": financial_data[12]
-            }
-            
-            prompt = f"""You are a financial analyst. Analyze this stock and provide:
+        # 재무 데이터 구성
+        metrics = {
+            "Ticker": ticker,
+            "DTE(%)": financial_data[0],
+            "CR(%)": financial_data[1],
+            "OPM(%)": financial_data[2],
+            "ROE(%)": financial_data[3],
+            "Runway": financial_data[4],
+            "Cash(M$)": financial_data[5],
+            "FCF(M$)": financial_data[6],
+            "Stability(%)": financial_data[7],
+            "PBR": financial_data[9],
+            "PER": financial_data[11],
+            "EPS": financial_data[12]
+        }
+        
+        prompt = f"""You are a financial analyst. Analyze this stock and provide:
 1. Grade: A/B/C/D/F
 2. Brief reason in Korean (max 50 words)
 
-Data: {json.dumps(metrics, indent=2)}
+Financial Data for {ticker}:
+{json.dumps(metrics, indent=2)}
 
-Criteria:
+Evaluation Criteria:
 - A: Excellent (ROE>15%, PER<20, Stable FCF, Low debt)
 - B: Good (Most metrics positive)
 - C: Average (Mixed results)
 - D: Below average (Multiple weaknesses)
 - F: Poor (Critical issues)
 
-Return JSON: {{"grade": "A/B/C/D/F", "reason": "Korean text"}}"""
+Return ONLY this JSON format:
+{{"grade": "A", "reason": "Korean explanation here"}}"""
+        
+        # === GEMINI ===
+        if llm_provider == "gemini":
+            if "GEMINI_API_KEY" not in st.secrets:
+                return "N/A", "Gemini API 키가 Secrets에 없습니다"
             
-            # 여러 모델 시도
-            for model_name in ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro']:
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    response = model.generate_content(prompt)
-                    result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
-                    return result.get("grade", "-"), result.get("reason", "-")
-                except:
-                    continue
-            
-            return "-", "모든 모델 실패"
-            
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                
+                # 여러 모델 시도
+                models_to_try = [
+                    'gemini-1.5-flash-latest',
+                    'gemini-1.5-flash', 
+                    'gemini-1.5-pro-latest',
+                    'gemini-1.5-pro',
+                    'gemini-pro'
+                ]
+                
+                last_error = None
+                for model_name in models_to_try:
+                    try:
+                        model = genai.GenerativeModel(model_name)
+                        response = model.generate_content(prompt)
+                        text = response.text.strip()
+                        
+                        # JSON 파싱
+                        text = text.replace("```json", "").replace("```", "").strip()
+                        result = json.loads(text)
+                        
+                        grade = result.get("grade", "C")
+                        reason = result.get("reason", "분석 완료")
+                        return grade, reason
+                        
+                    except Exception as e:
+                        last_error = str(e)
+                        continue
+                
+                # 모든 모델 실패
+                return "ERROR", f"Gemini 오류: {last_error[:60]}"
+                
+            except ImportError:
+                return "ERROR", "google-generativeai 패키지 미설치"
+            except Exception as e:
+                return "ERROR", f"Gemini 설정 오류: {str(e)[:60]}"
+        
+        # === GROQ ===
         elif llm_provider == "groq":
             if "GROQ_API_KEY" not in st.secrets:
-                return "-", "API 키 미설정"
+                return "N/A", "Groq API 키가 Secrets에 없습니다"
             
-            from groq import Groq
-            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-            # 나머지 Groq 코드...
-            return "-", "Groq 구현 예정"
+            try:
+                from groq import Groq
+                client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+                
+                chat_completion = client.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.5,
+                    max_tokens=500,
+                )
+                
+                text = chat_completion.choices[0].message.content.strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+                result = json.loads(text)
+                
+                grade = result.get("grade", "C")
+                reason = result.get("reason", "분석 완료")
+                return grade, reason
+                
+            except ImportError:
+                return "ERROR", "groq 패키지 미설치"
+            except Exception as e:
+                return "ERROR", f"Groq 오류: {str(e)[:60]}"
+        
+        # === CLAUDE ===
+        elif llm_provider == "claude":
+            if "ANTHROPIC_API_KEY" not in st.secrets:
+                return "N/A", "Claude API 키가 Secrets에 없습니다"
             
+            try:
+                import anthropic
+                client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+                
+                message = client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=500,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                text = message.content[0].text.strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+                result = json.loads(text)
+                
+                grade = result.get("grade", "C")
+                reason = result.get("reason", "분석 완료")
+                return grade, reason
+                
+            except ImportError:
+                return "ERROR", "anthropic 패키지 미설치"
+            except Exception as e:
+                return "ERROR", f"Claude 오류: {str(e)[:60]}"
+        
         else:
-            return "-", "지원하지 않는 LLM"
+            return "N/A", f"알 수 없는 LLM: {llm_provider}"
             
     except Exception as e:
-        return "-", f"오류: {str(e)[:50]}"
+        return "ERROR", f"예상치 못한 오류: {str(e)[:60]}"
 
 # --- [UI] Streamlit 설정 (원본 그대로) ---
 st.set_page_config(page_title="Stock Master Analyzer", layout="wide")
@@ -183,7 +265,15 @@ st.sidebar.markdown("---")
 st.sidebar.header("🤖 AI 분석 옵션")
 enable_ai = st.sidebar.checkbox("AI 투자 등급 분석", value=False)
 if enable_ai:
-    llm_provider = st.sidebar.selectbox("LLM 선택", ["gemini", "groq"])
+    llm_provider = st.sidebar.selectbox(
+        "LLM 선택", 
+        ["gemini", "groq", "claude"],
+        format_func=lambda x: {
+            "gemini": "🟢 Google Gemini (무료)",
+            "groq": "🟡 Groq Llama (무료, 빠름)",
+            "claude": "🔵 Claude Sonnet (유료)"
+        }[x]
+    )
     st.sidebar.info("💡 Streamlit Secrets에 API 키 설정 필요")
 
 tickers = []
