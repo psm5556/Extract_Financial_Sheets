@@ -104,48 +104,90 @@ def get_extended_financials(ticker_symbol):
 def analyze_with_ai(ticker, financial_data, llm_provider):
     """AI를 사용한 투자 등급 분석"""
     try:
-        # 재무 데이터 구성
+        # 재무 데이터 상세 구성
         metrics = {
             "Ticker": ticker,
+            
+            # === 수익성 지표 ===
+            "ROE(%)": financial_data[3],
+            "OPM(%)": financial_data[2],
+            "EPS": financial_data[12],
+            
+            # === 밸류에이션 ===
+            "PER": financial_data[11],
+            "PBR": financial_data[9],
+            "BPS": financial_data[10],
+            
+            # === 현금흐름 ===
+            "OCF(M$)": financial_data[8],
+            "FCF(M$)": financial_data[6],
+            "FCF_Stability(%)": financial_data[7],
+            
+            # === 재무건전성 ===
             "DTE(%)": financial_data[0],
             "CR(%)": financial_data[1],
-            "OPM(%)": financial_data[2],
-            "ROE(%)": financial_data[3],
-            "Runway": financial_data[4],
             "Cash(M$)": financial_data[5],
-            "FCF(M$)": financial_data[6],
-            "Stability(%)": financial_data[7],
-            "PBR": financial_data[9],
-            "PER": financial_data[11],
-            "EPS": financial_data[12]
+            "Runway(Years)": financial_data[4]
         }
         
-        prompt = f"""You are a professional financial analyst. Analyze {ticker} stock and provide investment grade and detailed Korean explanation.
+        prompt = f"""You are a professional equity analyst conducting fundamental analysis on {ticker}.
 
 Financial Data:
 {json.dumps(metrics, indent=2)}
 
-CRITICAL INSTRUCTIONS:
-1. Grade: Assign A/B/C/D/F based on overall financial health
-2. Reason: Write in KOREAN, minimum 40 words, maximum 80 words
-3. Reason MUST be complete sentences, NOT abbreviations or bullet points
-4. Focus on 2-3 most important insights
-5. Return ONLY valid JSON format
+CRITICAL ANALYSIS FRAMEWORK:
 
-Grading Criteria:
-- A (Excellent): ROE>20%, Strong FCF, PER<25, Low debt, Stable growth
-- B (Good): ROE 15-20%, Positive FCF, PER<30, Moderate debt
-- C (Average): ROE 10-15%, Mixed cash flow, PER<40, Average metrics
-- D (Below Average): ROE<10% or Negative FCF or High debt
-- F (Poor): Multiple critical weaknesses, high risk
+Step 1: CLASSIFY STOCK TYPE
+- Value Stock: PER < 15, PBR < 2, ROE > 15%, Stable business
+- Growth Stock: EPS growth trend, High FCF growth, Expanding margins
 
-Example GOOD Response:
-{{"grade": "A", "reason": "자기자본이익률이 32%로 매우 우수하며, 잉여현금흐름이 안정적으로 양수를 유지하고 있습니다. PER 28배는 다소 높지만 성장성을 고려하면 적정 수준이며, 부채비율 150%는 업계 평균 수준입니다."}}
+Step 2: APPLY APPROPRIATE CRITERIA
 
-Example BAD Response (DO NOT DO THIS):
-{{"grade": "A", "reason": "ROE, FCF, PER"}}  ← TOO SHORT, ABBREVIATIONS ONLY
+VALUE STOCK CRITERIA (Warren Buffett Style):
+✓ ROE consistently > 15% (경제적 해자)
+✓ Cash Flow Quality Ratio (OCF/Net Income) > 100%
+✓ Operating Margin > 10%
+✓ Debt/Equity < 100%
+✓ PER < Industry Average
+✓ FCF/Revenue > 10%
+✓ Stable or growing dividends
 
-Now analyze {ticker}. Return ONLY JSON:"""
+GROWTH STOCK CRITERIA (Peter Lynch Style):
+✓ EPS growth trajectory (check Y4→Y3→Y2→Y1→TTM)
+✓ FCF consistently positive and growing
+✓ Operating Margin expanding
+✓ High ROE (> 20%) with growth
+✓ PER acceptable if justified by growth (PEG ratio concept)
+✓ Low debt enabling reinvestment
+
+Step 3: ASSIGN GRADE
+- A (Excellent): Meets 5+ key criteria, no critical weaknesses
+- B (Good): Meets 3-4 criteria, minor concerns
+- C (Average): Mixed signals, 2-3 criteria met
+- D (Below Average): Fails multiple criteria
+- F (Poor): Critical red flags (negative FCF, ROE<10%, debt crisis)
+
+Step 4: WRITE KOREAN EXPLANATION (40-80 words)
+
+MUST INCLUDE:
+1. Stock type classification (가치주 or 성장주)
+2. 2-3 strongest points with specific numbers
+3. 1-2 concerns or weaknesses
+4. Overall investment thesis
+
+EXAMPLE EXCELLENT RESPONSE (Value Stock):
+{{"grade": "A", "reason": "전형적인 가치주로 ROE 18%를 5년간 유지하며 경제적 해자를 보유하고 있습니다. 현금흐름 질 비율 120%로 순이익 대비 실제 현금 유입이 우수하며, 영업이익률 12%는 업계 최상위권입니다. PER 14배는 저평가 구간이나, 부채비율 180%는 다소 부담스러운 수준입니다."}}
+
+EXAMPLE EXCELLENT RESPONSE (Growth Stock):
+{{"grade": "B", "reason": "성장주로서 EPS가 Y4 대비 45% 증가하며 강한 상승세를 보이고 있습니다. 영업이익률이 15%→18%→22%로 확대되며 규모의 경제 효과가 나타나고 있으나, PER 35배는 향후 성장률을 감안해도 다소 부담스러운 수준입니다. FCF 안정성 80%는 양호한 편입니다."}}
+
+WRONG EXAMPLES (DO NOT DO):
+❌ {{"grade": "A", "reason": "ROE, FCF, PER"}}  ← Only abbreviations
+❌ {{"grade": "B", "reason": "좋은 기업"}}  ← Too short, no specifics
+❌ {{"grade": "C", "reason": "The company has good fundamentals"}}  ← Not Korean
+
+Now analyze {ticker}. Return ONLY valid JSON:
+{{"grade": "A/B/C/D/F", "reason": "가치주/성장주 분류, 구체적 수치 포함, 40-80 한국어 단어"}}"""
         
         # === GEMINI ===
         if llm_provider == "gemini":
