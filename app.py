@@ -5,7 +5,6 @@ import numpy as np
 from datetime import datetime
 import time
 from urllib.parse import quote
-import google.generativeai as genai
 import json
 
 # --- [함수] 재무 데이터 추출 로직 ---
@@ -79,12 +78,12 @@ def get_extended_financials(ticker_symbol):
             stability,
             round(ttm_ocf / 1_000_000, 2) if ttm_ocf else None,
             round(info.get("priceToBook"), 2) if info.get("priceToBook") else None,
-            round(info.get("bookValue"), 2) if info.get("bookValue") else None, # BPS 복구
+            round(info.get("bookValue"), 2) if info.get("bookValue") else None,
             round(info.get("trailingPE"), 2) if info.get("trailingPE") else None,
             round(info.get("trailingEps"), 2) if info.get("trailingEps") else None
         ]
 
-        # 4. 시계열 추이 데이터 매핑 (인덱스: BPS 추가로 하나씩 더 밀림)
+        # 4. 시계열 추이 데이터 매핑
         ttm_vals_map = {
             "DTE": base_results[0], "CR": base_results[1], "OPM": base_results[2], 
             "ROE": base_results[3], "OCF": base_results[8], "EPS": base_results[12],
@@ -101,20 +100,12 @@ def get_extended_financials(ticker_symbol):
     except Exception:
         return [None] * (13 + 40)
 
-# --- [함수] LLM 기반 투자 등급 분석 ---
-def analyze_stock_with_llm(ticker, financial_data):
+# --- [함수] LLM 기반 투자 등급 분석 (다중 모델 지원) ---
+def analyze_stock_with_llm(ticker, financial_data, llm_provider="gemini"):
     """
     재무 데이터를 LLM에 전달하여 투자 등급(A~F) + 이유 반환
     """
     try:
-        # Gemini API 설정
-        api_key = st.secrets.get("GEMINI_API_KEY")
-        if not api_key:
-            return "N/A", "API 키가 설정되지 않았습니다."
-        
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
         # 재무 데이터 딕셔너리 구성
         metrics = {
             "Ticker": ticker,
@@ -143,23 +134,68 @@ Financial Data for {ticker}:
 {json.dumps(metrics, indent=2)}
 
 Evaluation Criteria:
-- PER < 15, PBR < 2: Undervalued
-- ROE > 15%, OPM > 10%: Strong profitability
-- FCF_Stability > 80%, Positive FCF: Healthy cash flow
-- DTE < 100%, CR > 150%: Solid financial structure
-- Runway > 5 years or Infinite: Good sustainability
+- Valuation: PER < 15, PBR < 2 (Undervalued) | PER 15-25, PBR 2-4 (Fair) | PER > 25, PBR > 4 (Overvalued)
+- Profitability: ROE > 15%, OPM > 10% (Excellent) | ROE 10-15%, OPM 5-10% (Good) | ROE < 10% (Weak)
+- Cash Flow: FCF_Stability > 80%, Positive FCF (Healthy) | 50-80% (Moderate) | < 50% (Risky)
+- Financial Health: DTE < 100%, CR > 150% (Strong) | DTE 100-200%, CR 100-150% (Average) | DTE > 200% (Weak)
+- Sustainability: Runway > 5 years or Infinite (Good) | 2-5 years (Moderate) | < 2 years (Risk)
+
+Grade Assignment:
+- A: 4+ Excellent criteria, 0 Weak
+- B: 3+ Good criteria, max 1 Weak
+- C: Mixed results, 2-3 Average
+- D: 2+ Weak criteria
+- F: 3+ Weak criteria or critical risks
 
 Return ONLY in this JSON format:
 {{"grade": "A/B/C/D/F", "reason": "Korean explanation"}}
 """
         
-        response = model.generate_content(prompt)
-        result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+        # LLM 호출 (선택된 제공자)
+        if llm_provider == "gemini":
+            import google.generativeai as genai
+            api_key = st.secrets.get("GEMINI_API_KEY")
+            if not api_key:
+                return "N/A", "Gemini API 키가 설정되지 않았습니다."
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt)
+            result_text = response.text
+            
+        elif llm_provider == "groq":
+            from groq import Groq
+            api_key = st.secrets.get("GROQ_API_KEY")
+            if not api_key:
+                return "N/A", "Groq API 키가 설정되지 않았습니다."
+            client = Groq(api_key=api_key)
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+            )
+            result_text = chat_completion.choices[0].message.content
+            
+        elif llm_provider == "anthropic":
+            import anthropic
+            api_key = st.secrets.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                return "N/A", "Anthropic API 키가 설정되지 않았습니다."
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            result_text = message.content[0].text
         
+        else:
+            return "N/A", "지원하지 않는 LLM 제공자입니다."
+        
+        # JSON 파싱
+        result = json.loads(result_text.strip().replace("```json", "").replace("```", ""))
         return result.get("grade", "N/A"), result.get("reason", "분석 실패")
     
     except Exception as e:
-        return "ERROR", f"분석 오류: {str(e)[:50]}"
+        return "ERROR", f"분석 오류: {str(e)[:100]}"
 
 # --- [UI] Streamlit 설정 ---
 st.set_page_config(page_title="Stock Master Analyzer with AI", layout="wide")
@@ -172,8 +208,19 @@ method = st.sidebar.radio("방식", ("텍스트 붙여넣기", "구글 스프레
 st.sidebar.markdown("---")
 st.sidebar.header("🤖 AI 분석 옵션")
 enable_ai = st.sidebar.checkbox("AI 투자 등급 분석 활성화", value=True)
+
 if enable_ai:
-    st.sidebar.info("💡 Gemini API 키가 필요합니다 (secrets.toml 설정)")
+    llm_provider = st.sidebar.selectbox(
+        "LLM 제공자 선택",
+        ["gemini", "groq", "anthropic"],
+        format_func=lambda x: {
+            "gemini": "Google Gemini (무료, 추천)",
+            "groq": "Groq Llama (무료, 빠름)",
+            "anthropic": "Claude Sonnet (유료)"
+        }[x]
+    )
+    
+    st.sidebar.info(f"💡 {llm_provider.upper()} API 키가 필요합니다 (secrets.toml 설정)")
 
 tickers = []
 if method == "텍스트 붙여넣기":
@@ -198,9 +245,9 @@ if tickers:
     if st.button("🚀 전수 분석 시작"):
         prog = st.progress(0); status = st.empty(); results = []
         
-        # 헤더 정의 (AI 등급 추가)
+        # 헤더 정의
         base_cols = [
-            'ticker', 'AI_Grade', 'AI_Reason',  # AI 분석 결과 추가
+            'ticker', 'AI_Grade', 'AI_Reason',
             'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
             'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
             'PBR', 'BPS', 'PER', 'EPS', 'Updated'
@@ -216,47 +263,58 @@ if tickers:
             # 재무 데이터 추출
             data = get_extended_financials(symbol)
             
-            # AI 등급 분석 (옵션)
+            # AI 등급 분석
             if enable_ai:
-                grade, reason = analyze_stock_with_llm(symbol, data[:13])
+                grade, reason = analyze_stock_with_llm(symbol, data[:13], llm_provider)
             else:
                 grade, reason = "-", "-"
             
-            # row: [ticker] + [AI등급,이유] + [기본13개] + [시간] + [추이40개]
+            # row 생성
             row = [symbol, grade, reason] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
             results.append(row)
             
             prog.progress((idx+1)/total)
-            time.sleep(0.5)  # API 호출 제한 고려
+            time.sleep(1 if llm_provider == "groq" else 2)  # API 제한 고려
 
         status.success(f"✅ 분석 완료!")
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
         
-        # 등급별 색상 표시를 위한 스타일링
+        # 등급별 색상 표시
         def highlight_grade(val):
             color_map = {
-                'A': 'background-color: #d4edda; color: #155724',
+                'A': 'background-color: #d4edda; color: #155724; font-weight: bold',
                 'B': 'background-color: #d1ecf1; color: #0c5460',
                 'C': 'background-color: #fff3cd; color: #856404',
                 'D': 'background-color: #f8d7da; color: #721c24',
-                'F': 'background-color: #f5c6cb; color: #721c24'
+                'F': 'background-color: #f5c6cb; color: #721c24; font-weight: bold'
             }
             return color_map.get(val, '')
         
         st.dataframe(
             res_df.style.applymap(highlight_grade, subset=['AI_Grade']),
-            use_container_width=True
+            use_container_width=True,
+            height=600
         )
         
         st.download_button(
             "📥 결과 CSV 다운로드", 
             res_df.to_csv(index=False).encode('utf-8'), 
-            "financial_analysis_with_ai.csv", 
+            f"financial_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
             "text/csv"
         )
         
         # 등급 분포 통계
-        if enable_ai:
-            st.markdown("### 📈 AI 등급 분포")
-            grade_counts = res_df['AI_Grade'].value_counts()
-            st.bar_chart(grade_counts)
+        if enable_ai and "-" not in res_df['AI_Grade'].values:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### 📈 AI 등급 분포")
+                grade_counts = res_df['AI_Grade'].value_counts().sort_index()
+                st.bar_chart(grade_counts)
+            
+            with col2:
+                st.markdown("### 📊 등급별 통계")
+                for grade in ['A', 'B', 'C', 'D', 'F']:
+                    count = grade_counts.get(grade, 0)
+                    pct = (count / total) * 100 if total > 0 else 0
+                    st.metric(f"{grade} 등급", f"{count}개", f"{pct:.1f}%")
