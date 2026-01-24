@@ -146,13 +146,13 @@ Return ONLY this JSON format:
                 import google.generativeai as genai
                 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
                 
-                # 여러 모델 시도
+                # 여러 모델 시도 (2025년 1월 기준 작동하는 모델)
                 models_to_try = [
-                    'gemini-1.5-flash-latest',
-                    'gemini-1.5-flash', 
-                    'gemini-1.5-pro-latest',
+                    'gemini-1.5-flash',  # 가장 안정적
                     'gemini-1.5-pro',
-                    'gemini-pro'
+                    'gemini-pro',
+                    'models/gemini-1.5-flash',  # 전체 경로 시도
+                    'models/gemini-pro'
                 ]
                 
                 last_error = None
@@ -267,13 +267,18 @@ enable_ai = st.sidebar.checkbox("AI 투자 등급 분석", value=False)
 if enable_ai:
     llm_provider = st.sidebar.selectbox(
         "LLM 선택", 
-        ["gemini", "groq", "claude"],
+        ["groq", "gemini", "claude"],  # Groq를 기본값으로
         format_func=lambda x: {
             "gemini": "🟢 Google Gemini (무료)",
-            "groq": "🟡 Groq Llama (무료, 빠름)",
+            "groq": "🟡 Groq Llama (무료, 빠름, 추천!)",
             "claude": "🔵 Claude Sonnet (유료)"
         }[x]
     )
+    
+    # Gemini 선택 시 경고
+    if llm_provider == "gemini":
+        st.sidebar.warning("⚠️ Gemini는 가끔 404 오류가 발생합니다. Groq 추천!")
+    
     st.sidebar.info("💡 Streamlit Secrets에 API 키 설정 필요")
 
 tickers = []
