@@ -5,6 +5,6 @@ pandas
 numpy
 
 # LLM 제공자 (하나 이상 선택)
-google-generativeai==0.4.0  # Google Gemini (무료, 추천)
-groq==0.11.0                # Groq (무료, 빠름)
-anthropic==0.39.0           # Claude (유료, 고품질)
+google-generativeai  # Google Gemini (무료, 추천)
+groq               # Groq (무료, 빠름)
+anthropic           # Claude (유료, 고품질)
