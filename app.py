@@ -66,7 +66,7 @@ def get_extended_financials(ticker_symbol):
         plus_count = sum(1 for v in fcf_series if v is not None and v > 0)
         stability = (plus_count / 5) * 100 if any(v is not None for v in fcf_series) else None
 
-        # 3. 요약 섹션(base_results) 데이터 구성 (BPS 복구)
+        # 3. 요약 섹션(base_results) 데이터 구성
         base_results = [
             round(ttm_dte, 2) if ttm_dte is not None else None,
             round(ttm_cr, 2) if ttm_cr is not None else None,
@@ -100,12 +100,41 @@ def get_extended_financials(ticker_symbol):
     except Exception:
         return [None] * (13 + 40)
 
-# --- [함수] LLM 기반 투자 등급 분석 (다중 모델 지원) ---
+# --- [함수] LLM 제공자별 API 키 확인 ---
+def check_api_key(provider):
+    """선택한 LLM 제공자의 API 키가 설정되어 있는지 확인"""
+    key_map = {
+        "gemini": "GEMINI_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY"
+    }
+    
+    required_key = key_map.get(provider)
+    if not required_key:
+        return False, "알 수 없는 제공자입니다."
+    
+    if required_key not in st.secrets:
+        return False, f"{required_key}가 Streamlit Secrets에 설정되지 않았습니다."
+    
+    api_key = st.secrets[required_key]
+    if not api_key or api_key == "":
+        return False, f"{required_key} 값이 비어있습니다."
+    
+    return True, api_key
+
+# --- [함수] LLM 기반 투자 등급 분석 ---
 def analyze_stock_with_llm(ticker, financial_data, llm_provider="gemini"):
     """
     재무 데이터를 LLM에 전달하여 투자 등급(A~F) + 이유 반환
     """
     try:
+        # API 키 확인
+        is_valid, result = check_api_key(llm_provider)
+        if not is_valid:
+            return "N/A", f"⚠️ {result}"
+        
+        api_key = result
+        
         # 재무 데이터 딕셔너리 구성
         metrics = {
             "Ticker": ticker,
@@ -154,9 +183,6 @@ Return ONLY in this JSON format:
         # LLM 호출 (선택된 제공자)
         if llm_provider == "gemini":
             import google.generativeai as genai
-            api_key = st.secrets.get("GEMINI_API_KEY")
-            if not api_key:
-                return "N/A", "Gemini API 키가 설정되지 않았습니다."
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content(prompt)
@@ -164,9 +190,6 @@ Return ONLY in this JSON format:
             
         elif llm_provider == "groq":
             from groq import Groq
-            api_key = st.secrets.get("GROQ_API_KEY")
-            if not api_key:
-                return "N/A", "Groq API 키가 설정되지 않았습니다."
             client = Groq(api_key=api_key)
             chat_completion = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
@@ -176,9 +199,6 @@ Return ONLY in this JSON format:
             
         elif llm_provider == "anthropic":
             import anthropic
-            api_key = st.secrets.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                return "N/A", "Anthropic API 키가 설정되지 않았습니다."
             client = anthropic.Anthropic(api_key=api_key)
             message = client.messages.create(
                 model="claude-sonnet-4-20250514",
@@ -199,51 +219,99 @@ Return ONLY in this JSON format:
 
 # --- [UI] Streamlit 설정 ---
 st.set_page_config(page_title="Stock Master Analyzer with AI", layout="wide")
-st.title("📊 AI 투자 등급 분석 시스템 (Y4 → TTM)")
+
+# --- [헤더] ---
+st.title("📊 AI 투자 등급 분석 시스템 (Multi-LLM)")
+st.markdown("**yfinance** 재무 데이터 + **AI 자동 등급 분석** (Y4 → TTM)")
 
 # --- [사이드바] ---
 st.sidebar.header("📥 데이터 소스")
 method = st.sidebar.radio("방식", ("텍스트 붙여넣기", "구글 스프레드시트", "CSV 파일 업로드"))
 
 st.sidebar.markdown("---")
-st.sidebar.header("🤖 AI 분석 옵션")
+st.sidebar.header("🤖 AI 분석 설정")
 enable_ai = st.sidebar.checkbox("AI 투자 등급 분석 활성화", value=True)
 
 if enable_ai:
+    # LLM 제공자 선택
+    llm_options = {
+        "gemini": "🟢 Google Gemini (무료, 추천)",
+        "groq": "🟡 Groq Llama (무료, 초고속)",
+        "anthropic": "🔵 Claude Sonnet (유료, 고품질)"
+    }
+    
     llm_provider = st.sidebar.selectbox(
-        "LLM 제공자 선택",
-        ["gemini", "groq", "anthropic"],
-        format_func=lambda x: {
-            "gemini": "Google Gemini (무료, 추천)",
-            "groq": "Groq Llama (무료, 빠름)",
-            "anthropic": "Claude Sonnet (유료)"
-        }[x]
+        "LLM 모델 선택",
+        list(llm_options.keys()),
+        format_func=lambda x: llm_options[x]
     )
     
-    st.sidebar.info(f"💡 {llm_provider.upper()} API 키가 필요합니다 (secrets.toml 설정)")
+    # API 키 상태 확인
+    is_valid, message = check_api_key(llm_provider)
+    
+    if is_valid:
+        st.sidebar.success(f"✅ {llm_provider.upper()} API 키 확인됨")
+    else:
+        st.sidebar.error(f"❌ {message}")
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### 🔑 API 키 설정 방법")
+        st.sidebar.code(f"""
+# Streamlit Cloud → Settings → Secrets에 추가:
 
+{llm_provider.upper()}_API_KEY = "your-api-key-here"
+""")
+        if llm_provider == "gemini":
+            st.sidebar.markdown("[Gemini API 키 발급하기](https://aistudio.google.com/app/apikey)")
+        elif llm_provider == "groq":
+            st.sidebar.markdown("[Groq API 키 발급하기](https://console.groq.com/keys)")
+        elif llm_provider == "anthropic":
+            st.sidebar.markdown("[Claude API 키 발급하기](https://console.anthropic.com/)")
+
+# 티커 입력
 tickers = []
 if method == "텍스트 붙여넣기":
-    raw = st.sidebar.text_area("티커 입력 (한 줄에 하나씩)")
-    if raw: tickers = [t.strip().upper() for t in raw.split('\n') if t.strip()]
+    raw = st.sidebar.text_area("티커 입력 (한 줄에 하나씩)", placeholder="AAPL\nMSFT\nGOOGL")
+    if raw: 
+        tickers = [t.strip().upper() for t in raw.split('\n') if t.strip()]
+        
 elif method == "구글 스프레드시트":
     try:
-        sid, sname = st.secrets["GOOGLE_SHEET_ID"], st.secrets["GOOGLE_SHEET_NAME"]
-        url = f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet={quote(sname)}"
-        gs_df = pd.read_csv(url); t_col = st.sidebar.selectbox("티커 컬럼", gs_df.columns)
-        tickers = gs_df[t_col].dropna().astype(str).tolist()
-    except Exception as e: st.sidebar.error(f"연결 실패: {e}")
+        if "GOOGLE_SHEET_ID" not in st.secrets or "GOOGLE_SHEET_NAME" not in st.secrets:
+            st.sidebar.warning("⚠️ Google Sheets 연동을 위해 Secrets에 GOOGLE_SHEET_ID와 GOOGLE_SHEET_NAME을 설정하세요.")
+        else:
+            sid, sname = st.secrets["GOOGLE_SHEET_ID"], st.secrets["GOOGLE_SHEET_NAME"]
+            url = f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet={quote(sname)}"
+            gs_df = pd.read_csv(url)
+            t_col = st.sidebar.selectbox("티커 컬럼", gs_df.columns)
+            tickers = gs_df[t_col].dropna().astype(str).tolist()
+            st.sidebar.success(f"✅ {len(tickers)}개 티커 로드됨")
+    except Exception as e: 
+        st.sidebar.error(f"연결 실패: {e}")
+        
 elif method == "CSV 파일 업로드":
-    up = st.sidebar.file_uploader("CSV", type=["csv"])
+    up = st.sidebar.file_uploader("CSV 파일 선택", type=["csv"])
     if up:
-        df = pd.read_csv(up); t_col = st.sidebar.selectbox("티커 컬럼", df.columns)
+        df = pd.read_csv(up)
+        t_col = st.sidebar.selectbox("티커 컬럼", df.columns)
         tickers = df[t_col].dropna().astype(str).tolist()
+        st.sidebar.success(f"✅ {len(tickers)}개 티커 로드됨")
 
 # --- [메인] 분석 실행 ---
 if tickers:
     total = len(tickers)
-    if st.button("🚀 전수 분석 시작"):
-        prog = st.progress(0); status = st.empty(); results = []
+    st.info(f"📌 분석 대상: **{total}개** 종목")
+    
+    if st.button("🚀 전수 분석 시작", type="primary", use_container_width=True):
+        # API 키 재확인
+        if enable_ai:
+            is_valid, message = check_api_key(llm_provider)
+            if not is_valid:
+                st.error(f"❌ {message}")
+                st.stop()
+        
+        prog = st.progress(0)
+        status = st.empty()
+        results = []
         
         # 헤더 정의
         base_cols = [
@@ -274,9 +342,16 @@ if tickers:
             results.append(row)
             
             prog.progress((idx+1)/total)
-            time.sleep(1 if llm_provider == "groq" else 2)  # API 제한 고려
+            
+            # API 호출 제한 고려 (제공자별 다른 대기 시간)
+            if llm_provider == "groq":
+                time.sleep(1)  # Groq는 빠름
+            elif llm_provider == "gemini":
+                time.sleep(2)  # Gemini 무료 티어
+            else:
+                time.sleep(0.5)  # Claude는 유료이므로 짧게
 
-        status.success(f"✅ 분석 완료!")
+        status.success(f"✅ 분석 완료! ({total}개 종목)")
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
         
         # 등급별 색상 표시
@@ -290,26 +365,32 @@ if tickers:
             }
             return color_map.get(val, '')
         
+        st.markdown("### 📋 분석 결과")
         st.dataframe(
             res_df.style.applymap(highlight_grade, subset=['AI_Grade']),
             use_container_width=True,
             height=600
         )
         
+        # CSV 다운로드
+        csv = res_df.to_csv(index=False).encode('utf-8')
+        filename = f"stock_analysis_{llm_provider}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
         st.download_button(
             "📥 결과 CSV 다운로드", 
-            res_df.to_csv(index=False).encode('utf-8'), 
-            f"financial_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", 
-            "text/csv"
+            csv, 
+            filename, 
+            "text/csv",
+            use_container_width=True
         )
         
         # 등급 분포 통계
         if enable_ai and "-" not in res_df['AI_Grade'].values:
-            col1, col2 = st.columns(2)
+            st.markdown("---")
+            col1, col2 = st.columns([3, 2])
             
             with col1:
-                st.markdown("### 📈 AI 등급 분포")
-                grade_counts = res_df['AI_Grade'].value_counts().sort_index()
+                st.markdown("### 📈 등급 분포 차트")
+                grade_counts = res_df['AI_Grade'].value_counts().reindex(['A', 'B', 'C', 'D', 'F'], fill_value=0)
                 st.bar_chart(grade_counts)
             
             with col2:
@@ -317,4 +398,36 @@ if tickers:
                 for grade in ['A', 'B', 'C', 'D', 'F']:
                     count = grade_counts.get(grade, 0)
                     pct = (count / total) * 100 if total > 0 else 0
-                    st.metric(f"{grade} 등급", f"{count}개", f"{pct:.1f}%")
+                    emoji = {'A': '🟢', 'B': '🔵', 'C': '🟡', 'D': '🟠', 'F': '🔴'}
+                    st.metric(f"{emoji[grade]} {grade} 등급", f"{count}개", f"{pct:.1f}%")
+
+else:
+    st.info("👈 사이드바에서 티커를 입력하세요")
+    
+    # 예시 표시
+    with st.expander("💡 사용 예시 보기"):
+        st.markdown("""
+        ### 티커 입력 예시
+        ```
+        AAPL
+        MSFT
+        GOOGL
+        TSLA
+        NVDA
+        ```
+        
+        ### 출력 결과 예시
+        | ticker | AI_Grade | AI_Reason |
+        |--------|----------|-----------|
+        | AAPL   | A        | ROE 30% 이상, 안정적 현금흐름, PER 적정 수준 |
+        | MSFT   | B        | 강한 재무구조, FCF 안정적, PBR 다소 높음 |
+        | TSLA   | C        | 성장성 우수하나 밸류에이션 부담 |
+        """)
+
+# 푸터
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: gray; font-size: 0.9em;'>
+    <p>Powered by yfinance + AI | LLM: {provider} | ⚠️ 투자 참고용이며, 실제 투자 결정은 본인 책임입니다</p>
+</div>
+""".format(provider=llm_provider.upper() if enable_ai else "None"), unsafe_allow_html=True)
