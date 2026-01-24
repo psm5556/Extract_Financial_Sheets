@@ -184,9 +184,28 @@ Return ONLY in this JSON format:
         if llm_provider == "gemini":
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt)
-            result_text = response.text
+            
+            # 여러 모델명 시도 (fallback)
+            model_names = [
+                'gemini-1.5-flash-latest',
+                'gemini-1.5-flash',
+                'gemini-pro',
+                'gemini-1.0-pro'
+            ]
+            
+            last_error = None
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+                    result_text = response.text
+                    break  # 성공하면 루프 종료
+                except Exception as e:
+                    last_error = str(e)
+                    continue  # 다음 모델 시도
+            else:
+                # 모든 모델 실패
+                raise Exception(f"모든 Gemini 모델 실패. 마지막 오류: {last_error}")
             
         elif llm_provider == "groq":
             from groq import Groq
@@ -214,8 +233,22 @@ Return ONLY in this JSON format:
         result = json.loads(result_text.strip().replace("```json", "").replace("```", ""))
         return result.get("grade", "N/A"), result.get("reason", "분석 실패")
     
+    except json.JSONDecodeError as e:
+        return "ERROR", f"JSON 파싱 실패: {str(e)[:50]}"
+    except ImportError as e:
+        return "ERROR", f"라이브러리 미설치: {str(e)[:50]}"
     except Exception as e:
-        return "ERROR", f"분석 오류: {str(e)[:100]}"
+        error_msg = str(e)
+        if "404" in error_msg:
+            return "ERROR", "모델을 찾을 수 없습니다. API 키를 확인하세요"
+        elif "401" in error_msg or "403" in error_msg:
+            return "ERROR", "API 키가 유효하지 않습니다"
+        elif "429" in error_msg:
+            return "ERROR", "API 호출 한도 초과 (잠시 후 재시도)"
+        elif "quota" in error_msg.lower():
+            return "ERROR", "API 무료 할당량 초과"
+        else:
+            return "ERROR", f"{error_msg[:80]}"
 
 # --- [UI] Streamlit 설정 ---
 st.set_page_config(page_title="Stock Master Analyzer with AI", layout="wide")
@@ -251,6 +284,16 @@ if enable_ai:
     
     if is_valid:
         st.sidebar.success(f"✅ {llm_provider.upper()} API 키 확인됨")
+        
+        # 디버그 모드 (선택사항)
+        show_debug = st.sidebar.checkbox("디버그 정보 표시", value=False)
+        if show_debug:
+            st.sidebar.info(f"""
+            **API 키 상태:**
+            - 제공자: {llm_provider}
+            - 키 길이: {len(api_key)} 자
+            - 키 시작: {api_key[:10]}...
+            """)
     else:
         st.sidebar.error(f"❌ {message}")
         st.sidebar.markdown("---")
@@ -328,31 +371,63 @@ if tickers:
         for idx, symbol in enumerate(tickers):
             status.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})")
             
-            # 재무 데이터 추출
-            data = get_extended_financials(symbol)
+            # 1단계: 재무 데이터 추출 (항상 실행)
+            try:
+                data = get_extended_financials(symbol)
+                data_status = "✅ 데이터 수집 완료"
+            except Exception as e:
+                data = [None] * (13 + 40)
+                data_status = f"❌ 데이터 수집 실패: {str(e)[:50]}"
             
-            # AI 등급 분석
+            # 2단계: AI 등급 분석 (옵션)
             if enable_ai:
-                grade, reason = analyze_stock_with_llm(symbol, data[:13], llm_provider)
+                try:
+                    grade, reason = analyze_stock_with_llm(symbol, data[:13], llm_provider)
+                    ai_status = "✅ AI 분석 완료"
+                except Exception as e:
+                    grade, reason = "ERROR", f"AI 분석 실패: {str(e)[:80]}"
+                    ai_status = f"⚠️ AI 분석 실패 (데이터는 정상)"
             else:
                 grade, reason = "-", "-"
+                ai_status = "⏭️ AI 분석 비활성화"
             
-            # row 생성
+            # 3단계: 결과 통합
             row = [symbol, grade, reason] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
             results.append(row)
+            
+            # 상태 표시
+            status.markdown(f"""
+            ### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})
+            - {data_status}
+            - {ai_status}
+            """)
             
             prog.progress((idx+1)/total)
             
             # API 호출 제한 고려 (제공자별 다른 대기 시간)
-            if llm_provider == "groq":
-                time.sleep(1)  # Groq는 빠름
-            elif llm_provider == "gemini":
-                time.sleep(2)  # Gemini 무료 티어
+            if enable_ai:
+                if llm_provider == "groq":
+                    time.sleep(1)  # Groq는 빠름
+                elif llm_provider == "gemini":
+                    time.sleep(2)  # Gemini 무료 티어
+                else:
+                    time.sleep(0.5)  # Claude는 유료이므로 짧게
             else:
-                time.sleep(0.5)  # Claude는 유료이므로 짧게
+                time.sleep(0.3)  # AI 미사용 시 빠르게
 
         status.success(f"✅ 분석 완료! ({total}개 종목)")
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
+        
+        # 분석 결과 요약
+        ai_errors = res_df[res_df['AI_Grade'] == 'ERROR'].shape[0]
+        data_errors = res_df[res_df['DTE(%)'] == '-'].shape[0]
+        
+        if ai_errors > 0 or data_errors > 0:
+            st.warning(f"""
+            ⚠️ 일부 종목에서 문제가 발생했습니다:
+            - AI 분석 실패: {ai_errors}개 (재무 데이터는 정상)
+            - 데이터 수집 실패: {data_errors}개
+            """)
         
         # 등급별 색상 표시
         def highlight_grade(val):
@@ -361,7 +436,8 @@ if tickers:
                 'B': 'background-color: #d1ecf1; color: #0c5460',
                 'C': 'background-color: #fff3cd; color: #856404',
                 'D': 'background-color: #f8d7da; color: #721c24',
-                'F': 'background-color: #f5c6cb; color: #721c24; font-weight: bold'
+                'F': 'background-color: #f5c6cb; color: #721c24; font-weight: bold',
+                'ERROR': 'background-color: #fff3cd; color: #856404'
             }
             return color_map.get(val, '')
         
@@ -384,22 +460,33 @@ if tickers:
         )
         
         # 등급 분포 통계
-        if enable_ai and "-" not in res_df['AI_Grade'].values:
-            st.markdown("---")
-            col1, col2 = st.columns([3, 2])
+        if enable_ai:
+            valid_grades = res_df[~res_df['AI_Grade'].isin(['ERROR', '-', 'N/A'])]
             
-            with col1:
-                st.markdown("### 📈 등급 분포 차트")
-                grade_counts = res_df['AI_Grade'].value_counts().reindex(['A', 'B', 'C', 'D', 'F'], fill_value=0)
-                st.bar_chart(grade_counts)
-            
-            with col2:
-                st.markdown("### 📊 등급별 통계")
-                for grade in ['A', 'B', 'C', 'D', 'F']:
-                    count = grade_counts.get(grade, 0)
-                    pct = (count / total) * 100 if total > 0 else 0
-                    emoji = {'A': '🟢', 'B': '🔵', 'C': '🟡', 'D': '🟠', 'F': '🔴'}
-                    st.metric(f"{emoji[grade]} {grade} 등급", f"{count}개", f"{pct:.1f}%")
+            if len(valid_grades) > 0:
+                st.markdown("---")
+                col1, col2 = st.columns([3, 2])
+                
+                with col1:
+                    st.markdown("### 📈 등급 분포 차트")
+                    grade_counts = valid_grades['AI_Grade'].value_counts().reindex(['A', 'B', 'C', 'D', 'F'], fill_value=0)
+                    st.bar_chart(grade_counts)
+                
+                with col2:
+                    st.markdown("### 📊 등급별 통계")
+                    valid_total = len(valid_grades)
+                    for grade in ['A', 'B', 'C', 'D', 'F']:
+                        count = grade_counts.get(grade, 0)
+                        pct = (count / valid_total) * 100 if valid_total > 0 else 0
+                        emoji = {'A': '🟢', 'B': '🔵', 'C': '🟡', 'D': '🟠', 'F': '🔴'}
+                        st.metric(f"{emoji[grade]} {grade} 등급", f"{count}개", f"{pct:.1f}%")
+                    
+                    # 분석 성공률
+                    st.markdown("---")
+                    success_rate = (valid_total / total) * 100 if total > 0 else 0
+                    st.metric("✅ AI 분석 성공률", f"{success_rate:.1f}%", f"{valid_total}/{total}")
+            else:
+                st.warning("⚠️ AI 분석에 성공한 종목이 없습니다. API 키와 설정을 확인해주세요.")
 
 else:
     st.info("👈 사이드바에서 티커를 입력하세요")
