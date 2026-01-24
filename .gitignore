@@ -1,0 +1,28 @@
+# Streamlit secrets (절대 커밋하지 말 것!)
+.streamlit/secrets.toml
+secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files
+*.csv
+*.xlsx
+*.xls
