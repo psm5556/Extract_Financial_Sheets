@@ -5,8 +5,9 @@ import numpy as np
 from datetime import datetime
 import time
 from urllib.parse import quote
+import json
 
-# --- [함수] 재무 데이터 추출 로직 ---
+# --- [함수] 재무 데이터 추출 로직 (원본 그대로) ---
 def get_extended_financials(ticker_symbol):
     try:
         symbol = ticker_symbol.upper().strip()
@@ -99,13 +100,92 @@ def get_extended_financials(ticker_symbol):
     except Exception:
         return [None] * (13 + 40)
 
-# --- [UI] Streamlit 설정 ---
-st.set_page_config(page_title="Stock Master Analyzer", layout="wide")
-st.title("📊 주식 재무 시계열 분석 마스터 (Y4 → TTM)")
+# --- [함수] AI 투자 등급 분석 (새로 추가) ---
+def analyze_with_ai(ticker, financial_data, llm_provider):
+    """AI를 사용한 투자 등급 분석"""
+    try:
+        # Streamlit Secrets에서 API 키 가져오기
+        if llm_provider == "gemini":
+            if "GEMINI_API_KEY" not in st.secrets:
+                return "-", "API 키 미설정"
+            
+            import google.generativeai as genai
+            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+            
+            # 재무 데이터 구성
+            metrics = {
+                "Ticker": ticker,
+                "DTE(%)": financial_data[0],
+                "CR(%)": financial_data[1],
+                "OPM(%)": financial_data[2],
+                "ROE(%)": financial_data[3],
+                "Runway": financial_data[4],
+                "Cash(M$)": financial_data[5],
+                "FCF(M$)": financial_data[6],
+                "Stability(%)": financial_data[7],
+                "PBR": financial_data[9],
+                "PER": financial_data[11],
+                "EPS": financial_data[12]
+            }
+            
+            prompt = f"""You are a financial analyst. Analyze this stock and provide:
+1. Grade: A/B/C/D/F
+2. Brief reason in Korean (max 50 words)
 
-# --- [사이드바] ---
+Data: {json.dumps(metrics, indent=2)}
+
+Criteria:
+- A: Excellent (ROE>15%, PER<20, Stable FCF, Low debt)
+- B: Good (Most metrics positive)
+- C: Average (Mixed results)
+- D: Below average (Multiple weaknesses)
+- F: Poor (Critical issues)
+
+Return JSON: {{"grade": "A/B/C/D/F", "reason": "Korean text"}}"""
+            
+            # 여러 모델 시도
+            for model_name in ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro']:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+                    result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+                    return result.get("grade", "-"), result.get("reason", "-")
+                except:
+                    continue
+            
+            return "-", "모든 모델 실패"
+            
+        elif llm_provider == "groq":
+            if "GROQ_API_KEY" not in st.secrets:
+                return "-", "API 키 미설정"
+            
+            from groq import Groq
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            # 나머지 Groq 코드...
+            return "-", "Groq 구현 예정"
+            
+        else:
+            return "-", "지원하지 않는 LLM"
+            
+    except Exception as e:
+        return "-", f"오류: {str(e)[:50]}"
+
+# --- [UI] Streamlit 설정 (원본 그대로) ---
+st.set_page_config(page_title="Stock Master Analyzer", layout="wide")
+st.title("📊 주식 재무 시계열 분석 마스터 (Y4 → TTM) + AI")
+
+# --- [사이드바] (원본에 AI 옵션만 추가) ---
 st.sidebar.header("📥 데이터 소스")
 method = st.sidebar.radio("방식", ("텍스트 붙여넣기", "구글 스프레드시트", "CSV 파일 업로드"))
+
+# AI 옵션 추가
+st.sidebar.markdown("---")
+st.sidebar.header("🤖 AI 분석 옵션")
+enable_ai = st.sidebar.checkbox("AI 투자 등급 분석", value=False)
+if enable_ai:
+    llm_provider = st.sidebar.selectbox("LLM 선택", ["gemini", "groq"])
+    st.sidebar.info("💡 Streamlit Secrets에 API 키 설정 필요")
+
 tickers = []
 if method == "텍스트 붙여넣기":
     raw = st.sidebar.text_area("티커 입력 (한 줄에 하나씩)")
@@ -123,18 +203,27 @@ elif method == "CSV 파일 업로드":
         df = pd.read_csv(up); t_col = st.sidebar.selectbox("티커 컬럼", df.columns)
         tickers = df[t_col].dropna().astype(str).tolist()
 
-# --- [메인] 분석 실행 ---
+# --- [메인] 분석 실행 (원본 기반, AI만 추가) ---
 if tickers:
     total = len(tickers)
     if st.button("🚀 전수 분석 시작"):
         prog = st.progress(0); status = st.empty(); results = []
         
-        # 헤더 정의 (BPS 포함 13개)
-        base_cols = [
-            'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
-            'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
-            'PBR', 'BPS', 'PER', 'EPS', 'Updated'
-        ]
+        # 헤더 정의 (AI 컬럼 추가)
+        if enable_ai:
+            base_cols = [
+                'ticker', 'AI_Grade', 'AI_Reason',
+                'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
+                'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
+                'PBR', 'BPS', 'PER', 'EPS', 'Updated'
+            ]
+        else:
+            # 원본 헤더 (AI 없음)
+            base_cols = [
+                'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
+                'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
+                'PBR', 'BPS', 'PER', 'EPS', 'Updated'
+            ]
         
         metrics = ["DTE", "CR", "OPM", "ROE", "OCF", "EPS", "CFQ", "FCF"]
         history_cols = [f"{m}_{y}" for m in metrics for y in ["Y4", "Y3", "Y2", "Y1", "TTM"]]
@@ -142,14 +231,31 @@ if tickers:
 
         for idx, symbol in enumerate(tickers):
             status.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})")
+            
+            # 재무 데이터 추출 (원본 그대로)
             data = get_extended_financials(symbol)
             
-            # row: [ticker] + [기본13개] + [시간] + [추이40개]
-            row = [symbol] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
+            # AI 분석 (선택사항)
+            if enable_ai:
+                ai_grade, ai_reason = analyze_with_ai(symbol, data[:13], llm_provider)
+                row = [symbol, ai_grade, ai_reason] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
+            else:
+                # 원본 방식
+                row = [symbol] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
+            
             results.append(row)
-            prog.progress((idx+1)/total); time.sleep(0.5)
+            prog.progress((idx+1)/total)
+            time.sleep(0.5 if not enable_ai else 2)
 
         status.success(f"✅ 분석 완료!")
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
         st.dataframe(res_df, use_container_width=True)
-        st.download_button("📥 결과 CSV 다운로드", res_df.to_csv(index=False).encode('utf-8'), "financial_analysis.csv", "text/csv")
+        
+        # CSV 다운로드
+        csv_filename = f"financial_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        st.download_button(
+            "📥 결과 CSV 다운로드", 
+            res_df.to_csv(index=False).encode('utf-8'), 
+            csv_filename, 
+            "text/csv"
+        )
