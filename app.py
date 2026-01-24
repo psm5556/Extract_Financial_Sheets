@@ -284,16 +284,6 @@ if enable_ai:
     
     if is_valid:
         st.sidebar.success(f"✅ {llm_provider.upper()} API 키 확인됨")
-        
-        # 디버그 모드 (선택사항)
-        show_debug = st.sidebar.checkbox("디버그 정보 표시", value=False)
-        if show_debug:
-            st.sidebar.info(f"""
-            **API 키 상태:**
-            - 제공자: {llm_provider}
-            - 키 길이: {len(api_key)} 자
-            - 키 시작: {api_key[:10]}...
-            """)
     else:
         st.sidebar.error(f"❌ {message}")
         st.sidebar.markdown("---")
@@ -371,63 +361,43 @@ if tickers:
         for idx, symbol in enumerate(tickers):
             status.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})")
             
-            # 1단계: 재무 데이터 추출 (항상 실행)
-            try:
-                data = get_extended_financials(symbol)
-                data_status = "✅ 데이터 수집 완료"
-            except Exception as e:
-                data = [None] * (13 + 40)
-                data_status = f"❌ 데이터 수집 실패: {str(e)[:50]}"
+            # 재무 데이터 추출 (원래 코드 그대로 유지)
+            data = get_extended_financials(symbol)
             
-            # 2단계: AI 등급 분석 (옵션)
+            # AI 등급 분석 (실패해도 데이터는 보존)
             if enable_ai:
                 try:
                     grade, reason = analyze_stock_with_llm(symbol, data[:13], llm_provider)
-                    ai_status = "✅ AI 분석 완료"
                 except Exception as e:
                     grade, reason = "ERROR", f"AI 분석 실패: {str(e)[:80]}"
-                    ai_status = f"⚠️ AI 분석 실패 (데이터는 정상)"
             else:
                 grade, reason = "-", "-"
-                ai_status = "⏭️ AI 분석 비활성화"
             
-            # 3단계: 결과 통합
+            # row 생성
             row = [symbol, grade, reason] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
             results.append(row)
             
-            # 상태 표시
-            status.markdown(f"""
-            ### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})
-            - {data_status}
-            - {ai_status}
-            """)
-            
             prog.progress((idx+1)/total)
             
-            # API 호출 제한 고려 (제공자별 다른 대기 시간)
+            # API 호출 제한 고려
             if enable_ai:
                 if llm_provider == "groq":
-                    time.sleep(1)  # Groq는 빠름
+                    time.sleep(1)
                 elif llm_provider == "gemini":
-                    time.sleep(2)  # Gemini 무료 티어
+                    time.sleep(2)
                 else:
-                    time.sleep(0.5)  # Claude는 유료이므로 짧게
+                    time.sleep(0.5)
             else:
-                time.sleep(0.3)  # AI 미사용 시 빠르게
+                time.sleep(0.3)
 
         status.success(f"✅ 분석 완료! ({total}개 종목)")
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
         
-        # 분석 결과 요약
-        ai_errors = res_df[res_df['AI_Grade'] == 'ERROR'].shape[0]
-        data_errors = res_df[res_df['DTE(%)'] == '-'].shape[0]
-        
-        if ai_errors > 0 or data_errors > 0:
-            st.warning(f"""
-            ⚠️ 일부 종목에서 문제가 발생했습니다:
-            - AI 분석 실패: {ai_errors}개 (재무 데이터는 정상)
-            - 데이터 수집 실패: {data_errors}개
-            """)
+        # AI 분석 오류만 체크
+        if enable_ai:
+            ai_errors = res_df[res_df['AI_Grade'] == 'ERROR'].shape[0]
+            if ai_errors > 0:
+                st.warning(f"⚠️ AI 분석 실패: {ai_errors}개 종목 (재무 데이터는 정상)")
         
         # 등급별 색상 표시
         def highlight_grade(val):
