@@ -5,6 +5,8 @@ import numpy as np
 from datetime import datetime
 import time
 from urllib.parse import quote
+import google.generativeai as genai
+import json
 
 # --- [함수] 재무 데이터 추출 로직 ---
 def get_extended_financials(ticker_symbol):
@@ -99,13 +101,80 @@ def get_extended_financials(ticker_symbol):
     except Exception:
         return [None] * (13 + 40)
 
+# --- [함수] LLM 기반 투자 등급 분석 ---
+def analyze_stock_with_llm(ticker, financial_data):
+    """
+    재무 데이터를 LLM에 전달하여 투자 등급(A~F) + 이유 반환
+    """
+    try:
+        # Gemini API 설정
+        api_key = st.secrets.get("GEMINI_API_KEY")
+        if not api_key:
+            return "N/A", "API 키가 설정되지 않았습니다."
+        
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # 재무 데이터 딕셔너리 구성
+        metrics = {
+            "Ticker": ticker,
+            "DTE(%)": financial_data[0],
+            "CR(%)": financial_data[1],
+            "OPM(%)": financial_data[2],
+            "ROE(%)": financial_data[3],
+            "Runway(Y)": financial_data[4],
+            "TotalCash(M$)": financial_data[5],
+            "FCF(M$)": financial_data[6],
+            "FCF_Stability(%)": financial_data[7],
+            "OCF(M$)": financial_data[8],
+            "PBR": financial_data[9],
+            "BPS": financial_data[10],
+            "PER": financial_data[11],
+            "EPS": financial_data[12]
+        }
+        
+        # 프롬프트 구성
+        prompt = f"""
+You are a professional financial analyst. Analyze the following stock's financial metrics and provide:
+1. Investment Grade: A (Excellent) / B (Good) / C (Average) / D (Below Average) / F (Poor)
+2. Brief Reason (50 words max, Korean)
+
+Financial Data for {ticker}:
+{json.dumps(metrics, indent=2)}
+
+Evaluation Criteria:
+- PER < 15, PBR < 2: Undervalued
+- ROE > 15%, OPM > 10%: Strong profitability
+- FCF_Stability > 80%, Positive FCF: Healthy cash flow
+- DTE < 100%, CR > 150%: Solid financial structure
+- Runway > 5 years or Infinite: Good sustainability
+
+Return ONLY in this JSON format:
+{{"grade": "A/B/C/D/F", "reason": "Korean explanation"}}
+"""
+        
+        response = model.generate_content(prompt)
+        result = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+        
+        return result.get("grade", "N/A"), result.get("reason", "분석 실패")
+    
+    except Exception as e:
+        return "ERROR", f"분석 오류: {str(e)[:50]}"
+
 # --- [UI] Streamlit 설정 ---
-st.set_page_config(page_title="Stock Master Analyzer", layout="wide")
-st.title("📊 주식 재무 시계열 분석 마스터 (Y4 → TTM)")
+st.set_page_config(page_title="Stock Master Analyzer with AI", layout="wide")
+st.title("📊 AI 투자 등급 분석 시스템 (Y4 → TTM)")
 
 # --- [사이드바] ---
 st.sidebar.header("📥 데이터 소스")
 method = st.sidebar.radio("방식", ("텍스트 붙여넣기", "구글 스프레드시트", "CSV 파일 업로드"))
+
+st.sidebar.markdown("---")
+st.sidebar.header("🤖 AI 분석 옵션")
+enable_ai = st.sidebar.checkbox("AI 투자 등급 분석 활성화", value=True)
+if enable_ai:
+    st.sidebar.info("💡 Gemini API 키가 필요합니다 (secrets.toml 설정)")
+
 tickers = []
 if method == "텍스트 붙여넣기":
     raw = st.sidebar.text_area("티커 입력 (한 줄에 하나씩)")
@@ -129,9 +198,10 @@ if tickers:
     if st.button("🚀 전수 분석 시작"):
         prog = st.progress(0); status = st.empty(); results = []
         
-        # 헤더 정의 (BPS 포함 13개)
+        # 헤더 정의 (AI 등급 추가)
         base_cols = [
-            'ticker', 'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
+            'ticker', 'AI_Grade', 'AI_Reason',  # AI 분석 결과 추가
+            'DTE(%)', 'CR(%)', 'OPM(%)', 'ROE(%)', 'Runway(Y)', 
             'TotalCash(M$)', 'FCF(M$)', 'FCF_Stability(%)', 'OCF(M$)', 
             'PBR', 'BPS', 'PER', 'EPS', 'Updated'
         ]
@@ -142,14 +212,51 @@ if tickers:
 
         for idx, symbol in enumerate(tickers):
             status.markdown(f"### ⏳ 분석 중: **{symbol}** ({idx+1} / {total})")
+            
+            # 재무 데이터 추출
             data = get_extended_financials(symbol)
             
-            # row: [ticker] + [기본13개] + [시간] + [추이40개]
-            row = [symbol] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
+            # AI 등급 분석 (옵션)
+            if enable_ai:
+                grade, reason = analyze_stock_with_llm(symbol, data[:13])
+            else:
+                grade, reason = "-", "-"
+            
+            # row: [ticker] + [AI등급,이유] + [기본13개] + [시간] + [추이40개]
+            row = [symbol, grade, reason] + data[:13] + [datetime.now().strftime('%H:%M:%S')] + data[13:]
             results.append(row)
-            prog.progress((idx+1)/total); time.sleep(0.5)
+            
+            prog.progress((idx+1)/total)
+            time.sleep(0.5)  # API 호출 제한 고려
 
         status.success(f"✅ 분석 완료!")
         res_df = pd.DataFrame(results, columns=final_cols).fillna("-")
-        st.dataframe(res_df, use_container_width=True)
-        st.download_button("📥 결과 CSV 다운로드", res_df.to_csv(index=False).encode('utf-8'), "financial_analysis.csv", "text/csv")
+        
+        # 등급별 색상 표시를 위한 스타일링
+        def highlight_grade(val):
+            color_map = {
+                'A': 'background-color: #d4edda; color: #155724',
+                'B': 'background-color: #d1ecf1; color: #0c5460',
+                'C': 'background-color: #fff3cd; color: #856404',
+                'D': 'background-color: #f8d7da; color: #721c24',
+                'F': 'background-color: #f5c6cb; color: #721c24'
+            }
+            return color_map.get(val, '')
+        
+        st.dataframe(
+            res_df.style.applymap(highlight_grade, subset=['AI_Grade']),
+            use_container_width=True
+        )
+        
+        st.download_button(
+            "📥 결과 CSV 다운로드", 
+            res_df.to_csv(index=False).encode('utf-8'), 
+            "financial_analysis_with_ai.csv", 
+            "text/csv"
+        )
+        
+        # 등급 분포 통계
+        if enable_ai:
+            st.markdown("### 📈 AI 등급 분포")
+            grade_counts = res_df['AI_Grade'].value_counts()
+            st.bar_chart(grade_counts)
